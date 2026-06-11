@@ -1,0 +1,39 @@
+# Ambientes virtuais
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.env
+.env.local
+
+# Streamlit
+.streamlit/secrets.toml
+# O .example é versionado para referência
+
+# Logs
+*.log
+logs/
+
+# DuckDB (binário grande — usar Git LFS ou regenerar localmente)
+data/*.duckdb
+data/*.wal
+
+# Excel com dados sensíveis de custo (regenerado pelo processar_seconds_profitability.py)
+data/seconds/
+data/seconds_cmv.xlsx
+
+# Scripts de auditoria temporários
+_*.py
+_rebuild_ads_tab.py
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
