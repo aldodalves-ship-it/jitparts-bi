@@ -12402,3 +12402,280 @@ def render_ads_performance(
     )
 
     # =========================================================
+
+    # ================================================================
+    # BLOCO 1 — RESUMO EXECUTIVO: 6 CARDS ESTRATEGICOS
+    # ================================================================
+    render_ads_section_title("Resumo Executivo Ads")
+
+    _col_input, _col_note = st.columns([1, 2])
+    with _col_input:
+        _conv_ml_ref = st.number_input(
+            "Conversao ML (painel ML, %)",
+            min_value=0.0, max_value=100.0,
+            value=st.session_state.get("_conv_ml_ref", 0.0),
+            step=0.1, format="%.2f",
+            key="_conv_ml_ref",
+            help=(
+                "Vendas totais / visitas totais da loja (organico + Ads). "
+                "Fonte: painel Mercado Livre."
+            ),
+        )
+    with _col_note:
+        if _conv_ml_ref == 0:
+            st.caption("Informe o valor do painel ML para calcular Gap ML vs Ads.")
+        else:
+            st.caption(f"Conversao ML calibrada em **{_conv_ml_ref:.2f}%**.")
+
+    _conv_ads_pct = float(kpis.get("conversion_rate") or 0.0)
+    _gap_ml_ads   = _conv_ml_ref - _conv_ads_pct if _conv_ml_ref > 0 else None
+    _roas_val     = float(kpis.get("roas_adjusted") or 0.0)
+    _cpc_val      = float(kpis.get("cpc_adjusted") or 0.0)
+
+    if _conv_ads_pct > 0 and _conv_ml_ref > 0 and _conv_ads_pct < _conv_ml_ref * 0.50:
+        st.warning(f"Ads converte {br_percent(_conv_ads_pct)} vs {br_percent(_conv_ml_ref)} do ML. Revisar segmentacao.")
+    if _roas_val > 0 and _roas_val < 3:
+        st.warning(f"ROAS baixo ({br_number(_roas_val, 2)}x). Revisar campanhas antes de escalar.")
+    if _cpc_val > 2:
+        st.warning(f"CPC elevado ({br_money(_cpc_val)}/clique). Monitorar custo de aquisicao.")
+
+    _gap_txt = (("+" if (_gap_ml_ads or 0) >= 0 else "") + br_percent(_gap_ml_ads)) if _gap_ml_ads is not None else "Informe Conv. ML"
+    _gap_cor = "#0F766E" if (_gap_ml_ads or 0) > 0 else "#64748B"
+
+    _exec_cards = [
+        render_ads_kpi_card("Conversao ML",    br_percent(_conv_ml_ref) if _conv_ml_ref > 0 else "—", "#F8FAFC", "Pedidos totais / visitas totais. Fonte: painel ML.", "Referencia loja" if _conv_ml_ref > 0 else "Nao informado", "Painel Mercado Livre"),
+        render_ads_kpi_card("Conversao Ads",   br_percent(_conv_ads_pct), "#2563EB", "Unidades atribuidas a Ads / cliques em anuncios pagos.", conv_status, conv_meta),
+        render_ads_kpi_card("Gap ML vs Ads",   _gap_txt, _gap_cor, "Diferenca entre Conv. ML e Conv. Ads. Indica forca do trafego organico.", "Organico contribui" if (_gap_ml_ads or 0) > 0 else "Sem referencia", "Conv. ML - Conv. Ads"),
+        render_ads_kpi_card("ROAS",            br_number(_roas_val, 2) + "x", roas_color, "Receita Ads / investimento ajustado. Meta: acima de 6.", roas_status, roas_meta),
+        render_ads_kpi_card("CPC",             br_money(_cpc_val), "#7C3AED", "Custo medio por clique.", "Monitoramento", "Sem meta fixa"),
+        render_ads_kpi_card("Investimento Ads", br_money(kpis["cost_adjusted"]), "#DC2626" if margin_impact_pct > 3 else "#0F766E", "Total investido. Referencia: ate 3% da receita.", impact_status, impact_meta),
+    ]
+    st.markdown(f'<div class="ads-kpi-grid">{"".join(_exec_cards)}</div>', unsafe_allow_html=True)
+
+    # ================================================================
+    # BLOCO 2 — EFICIENCIA DE FUNIL
+    # ================================================================
+    render_ads_section_title("Eficiencia de Funil — Ads vs Organico")
+
+    _total_clicks = float(kpis.get("clicks") or 0.0)
+    _total_impr   = float(kpis.get("impressions") or 0.0)
+    _units_ads    = float(kpis.get("conversions") or 0.0)
+    _revenue_ads  = float(kpis.get("revenue") or 0.0)
+
+    if _conv_ml_ref > 0:
+        _pedidos_totais  = float(financial_base["order_id"].nunique()) if not financial_base.empty and "order_id" in financial_base.columns else 0
+        _visitas_totais  = _pedidos_totais / (_conv_ml_ref / 100) if _conv_ml_ref > 0 else 0
+        _visitas_org_est = max(_visitas_totais - _total_clicks, 0)
+        _units_org_est   = max(float(financial_base["quantity"].sum() if not financial_base.empty else 0) - _units_ads, 0)
+        _conv_org_est    = _units_org_est / _visitas_org_est * 100 if _visitas_org_est > 0 else 0
+        _tem_organico    = True
+    else:
+        _visitas_totais = _visitas_org_est = _units_org_est = _conv_org_est = 0
+        _tem_organico = False
+
+    _fcol1, _fcol2 = st.columns(2)
+    with _fcol1:
+        st.markdown('<div class="section-title" style="color:#2563EB;">Trafego Pago (Ads)</div>', unsafe_allow_html=True)
+        for _lbl, _val, _tip in [
+            ("Impressoes",    br_number(_total_impr, 0),    "Quantidade de vezes que o anuncio apareceu."),
+            ("Cliques",       br_number(_total_clicks, 0),  "Cliques em anuncios pagos."),
+            ("Conversoes Ads",br_number(_units_ads, 0),     "Unidades atribuidas as campanhas."),
+            ("Receita Ads",   br_money(_revenue_ads),       "Receita atribuida pelo ML."),
+            ("Conversao Ads", br_percent(_conv_ads_pct),    "Unidades Ads / cliques. Meta: acima de 2,5%."),
+            ("CTR",           br_percent(float(kpis.get("ctr") or 0.0)), "Cliques / impressoes. Meta: acima de 0,25%."),
+        ]:
+            st.metric(_lbl, _val, help=_tip)
+
+    with _fcol2:
+        st.markdown('<div class="section-title" style="color:#0F766E;">Trafego Organico (estimado)</div>', unsafe_allow_html=True)
+        if _tem_organico:
+            st.caption("Estimado a partir da diferenca entre total ML e Ads.")
+            for _lbl, _val, _tip in [
+                ("Visitas totais ML (est.)", br_number(_visitas_totais, 0), "Pedidos / Conv. ML informada."),
+                ("Visitas organicas (est.)", br_number(_visitas_org_est, 0), "Visitas totais - cliques Ads."),
+                ("Vendas organicas (est.)",  br_number(_units_org_est, 0),  "Unidades totais - unidades Ads."),
+                ("Conversao organica (est.)",br_percent(_conv_org_est),     "Vendas organicas / visitas organicas estimadas."),
+            ]:
+                st.metric(_lbl, _val, help=_tip)
+        else:
+            st.info("Informe a Conversao ML acima para estimar o trafego organico.")
+
+    # ================================================================
+    # BLOCO 3 — QUADRANTE DE CAMPANHAS
+    # ================================================================
+    render_ads_section_title("Quadrante de Campanhas")
+    st.plotly_chart(ads_campaign_quadrant_chart(campaign), use_container_width=True)
+    st.caption("ROAS > 6 e ACOS < 10% Escalar. ROAS < 3 Revisar. Tamanho proporcional a receita.")
+
+    render_ads_section_title("Participacao dos Investimentos")
+    st.plotly_chart(ads_budget_share_chart(campaign), use_container_width=True)
+
+    # ================================================================
+    # BLOCO 4 — ALERTAS EXECUTIVOS
+    # ================================================================
+    render_ads_section_title("Alertas de Ads")
+    _sev_colors = {"Alta": "#DC2626", "Media": "#D97706", "Oportunidade": "#0F766E", "Saudavel": "#0F766E"}
+    _alert_html = "".join(
+        f'<div class="ads-alert-card" style="--alert-color:{_sev_colors.get(alert["criticidade"], "#64748B")};">'
+        f'<div class="ads-alert-severity">{html.escape(alert["criticidade"])}</div>'
+        f'<div class="ads-alert-title">{html.escape(alert["alerta"])}</div>'
+        f'<div class="ads-alert-detail">Impacto: {html.escape(alert["impacto"])}<br>{html.escape(alert["recomendacao"])}</div>'
+        "</div>"
+        for alert in alerts
+    )
+    st.markdown(f'<div class="ads-alert-grid">{_alert_html}</div>', unsafe_allow_html=True)
+
+    # ================================================================
+    # BLOCO 5 — RENTABILIDADE
+    # ================================================================
+    render_ads_section_title("Rentabilidade Ads")
+    _rent_cards = [
+        render_ads_kpi_card("ROAS",  br_number(kpis["roas_adjusted"], 2) + "x", roas_color, "Receita Ads / investimento. Meta: acima de 6.", roas_status, roas_meta),
+        render_ads_kpi_card("ACOS",  br_percent(kpis["acos_adjusted"]), acos_color, "Investimento / receita Ads x 100. Meta: abaixo de 15%.", acos_status, acos_meta),
+        render_ads_kpi_card("Impacto na Margem", br_percent(margin_impact_pct), "#DC2626" if margin_impact_pct > 3 else "#0F766E", "Investimento como % da receita total.", impact_status, impact_meta),
+        render_ads_kpi_card("Margem Gerada", br_money(margin_contribution["margem_gerada"]), "#2563EB", "Receita Ads - Investimento Ads.", "Monitoramento", "Deve ser positiva"),
+    ]
+    st.markdown(f'<div class="ads-kpi-grid">{"".join(_rent_cards)}</div>', unsafe_allow_html=True)
+
+    render_ads_section_title("Conciliacao com Financeiro Executivo")
+    if financial_base.empty:
+        st.info("Base financeira indisponivel.")
+    else:
+        reconciliation = build_ads_financial_reconciliation(kpis, financial_base, ads, selected_period, all_ads_df)
+        reconciliation_display = reconciliation.copy()
+        for column in ["Ads & Performance", "Financeiro Executivo", "Diferenca"]:
+            reconciliation_display[column] = reconciliation_display[column].map(br_money)
+        st.dataframe(reconciliation_display, use_container_width=True, hide_index=True, height=90)
+
+    # ================================================================
+    # BLOCO 6 — CAMPANHAS
+    # ================================================================
+    render_ads_section_title("Campanhas")
+    if campaign.empty:
+        st.info("Sem campanhas de Ads para o periodo selecionado.")
+    else:
+        campaign_display = campaign.copy()
+        campaign_display["status"] = campaign_display["status_campanha"]
+        display_columns = ["campaign_name", "cost", "revenue", "roas", "acos", "clicks", "impressions", "ctr", "cpc", "status", "acao_recomendada"]
+        formatted_campaign = campaign_display[display_columns].rename(columns={
+            "campaign_name": "Campanha", "cost": "Investimento", "revenue": "Receita",
+            "roas": "ROAS", "acos": "ACOS", "clicks": "Cliques",
+            "impressions": "Impressoes", "ctr": "CTR", "cpc": "CPC",
+            "status": "Status", "acao_recomendada": "Acao recomendada",
+        })
+        for column in ["Investimento", "Receita", "CPC"]:
+            formatted_campaign[column] = formatted_campaign[column].map(br_money)
+        for column in ["ACOS", "CTR"]:
+            formatted_campaign[column] = formatted_campaign[column].map(br_percent)
+        formatted_campaign["ROAS"] = formatted_campaign["ROAS"].map(lambda v: br_number(v, 2))
+        formatted_campaign["Cliques"] = formatted_campaign["Cliques"].map(lambda v: br_number(v, 0))
+        formatted_campaign["Impressoes"] = formatted_campaign["Impressoes"].map(lambda v: br_number(v, 0))
+        with st.expander("Tabela de campanhas", expanded=False):
+            st.dataframe(formatted_campaign, use_container_width=True, hide_index=True, height=320)
+        with st.expander("Rankings de campanhas", expanded=False):
+            for title, data, metric in [
+                ("Top campanhas por receita", campaign.sort_values("revenue", ascending=False).head(10), "revenue"),
+                ("Top campanhas por ROAS",    campaign[campaign["roas"] > 0].sort_values("roas", ascending=False).head(10), "roas"),
+                ("Maior gasto",               campaign.sort_values("cost", ascending=False).head(10), "cost"),
+            ]:
+                st.plotly_chart(bar_chart(data.sort_values(metric), metric, "campaign_name", title, "h") if not data.empty else empty_fig(title), use_container_width=True)
+
+    with st.expander("Auditoria da fonte Ads", expanded=False):
+        st.dataframe(pd.DataFrame([
+            ("Investimento", "ml_ads_metrics.csv", "sum(cost)"),
+            ("Receita Ads",  "ml_ads_metrics.csv", "sum(revenue)"),
+            ("ROAS",         "ml_ads_metrics.csv", "sum(revenue)/sum(cost)"),
+            ("ACOS",         "ml_ads_metrics.csv", "sum(cost)/sum(revenue)*100"),
+            ("CTR",          "ml_ads_metrics.csv", "sum(clicks)/sum(impressions)*100"),
+            ("Conversao",    "ml_ads_metrics.csv", "sum(units)/sum(clicks)*100"),
+        ], columns=["KPI", "Fonte", "Formula"]), use_container_width=True, hide_index=True)
+
+    st.download_button("Download CSV de Ads", data=ads.to_csv(index=False, encoding="utf-8-sig"), file_name="ml_ads_filtrado.csv", mime="text/csv", use_container_width=True)
+
+
+def render_base_completa(df: pd.DataFrame) -> None:
+    search = st.text_input("Busca textual na base filtrada", placeholder="Produto, SKU, MLB, marca, categoria...")
+    show_technical_columns = st.checkbox("Mostrar colunas tecnicas", value=False)
+    view = df.copy()
+    if search:
+        mask = pd.Series(False, index=view.index)
+        for column in ["item_id", "SKU", "produto", "Marca", "Nome da Categoria", "Status"]:
+            if column in view.columns:
+                mask = mask | view[column].astype(str).str.contains(search, case=False, na=False)
+        view = view[mask]
+    st.download_button("Download CSV filtrado", data=view.to_csv(index=False, encoding="utf-8-sig"), file_name="dashboard_base_filtrada.csv", mime="text/csv", use_container_width=True)
+    executive_columns = ["date","order_id","item_id","SKU","produto","Marca","Nome da Categoria","quantity","receita","CMV total","sale_fee","custo_frete_final","imposto","lucro_liquido_estimado","margem_liquida_estimada","FULL","Flex","Status","status_estoque","LinkAnuncio"]
+    visible = view if show_technical_columns else view[[c for c in executive_columns if c in view.columns]]
+    st.dataframe(format_table(visible), use_container_width=True, hide_index=True, height=620)
+
+
+def main() -> None:
+    inject_css()
+
+    # Bootstrap: garante que os dados existem
+    if not ensure_data_ready(show_ui=True):
+        return
+
+    try:
+        with st.spinner("Preparando dashboard executivo..."):
+            df = load_data(str(DATA_PATH))
+            seconds_official_df = load_seconds_official_data(str(SECONDS_OFFICIAL_PATH))
+            inventory_df = load_inventory_data(str(INVENTORY_PATH))
+            ads_df = load_ads_metrics(str(ADS_METRICS_PATH))
+            df = enrich_sales_with_inventory(df, inventory_df)
+    except FileNotFoundError as exc:
+        st.error(f"Arquivo de dados nao encontrado: {exc}")
+        if st.button("Tentar gerar dados agora"):
+            st.cache_data.clear()
+            st.rerun()
+        return
+    except Exception as exc:
+        st.error(f"Erro ao carregar a base: {exc}")
+        return
+
+    if df.empty:
+        st.warning("A base final esta vazia.")
+        return
+
+    filtered, selected_period, base_period, filter_state, financial_mode = apply_filters(df, inventory_df)
+    filtered, seconds_period_warning = apply_seconds_snapshot_period_guard(filtered, selected_period)
+    financial_filtered, financial_warning = prepare_financial_view(filtered, seconds_official_df, selected_period, filter_state, financial_mode)
+    comparison_filtered = apply_non_date_filters(df, filter_state)
+    financial_comparison_base, _ = prepare_financial_view(comparison_filtered, seconds_official_df, selected_period, filter_state, financial_mode)
+
+    seconds_official_period = get_official_seconds_period(seconds_official_df)
+    render_header(selected_period, base_period, filter_state.get("requested_period"))
+    if financial_mode == FINANCIAL_MODE_OFFICIAL and seconds_official_period:
+        st.info(f"Fonte: Seconds Oficial — snapshot {format_period(seconds_official_period)}.")
+    if seconds_period_warning:
+        st.warning(seconds_period_warning)
+    if financial_warning:
+        st.warning(financial_warning)
+
+    if filtered.empty and financial_filtered.empty:
+        start_date, end_date = selected_period
+        st.warning(f"Nenhum dado encontrado para {start_date:%d/%m/%Y} a {end_date:%d/%m/%Y}.")
+        return
+
+    filtered_ads, ads_filter_info = filter_ads_by_period(ads_df, selected_period)
+    if ads_filter_info.get("message"):
+        st.warning(str(ads_filter_info["message"]))
+
+    tabs = st.tabs(["Visao Geral","Inteligencia Comercial","Financeiro Executivo","Publicidade & Performance","Operacional & Estoque","Base Completa"])
+
+    with tabs[0]:
+        render_visao_geral_executiva(filtered, financial_filtered, inventory_df, filtered_ads, filter_state, selected_period)
+    with tabs[1]:
+        render_inteligencia_comercial(filtered, financial_filtered, inventory_df, filtered_ads, filter_state)
+    with tabs[2]:
+        render_financeiro_executivo(financial_filtered, filtered_ads, selected_period, financial_comparison_base, ads_df)
+    with tabs[3]:
+        render_ads_performance(filtered_ads, ads_filter_info, selected_period, financial_filtered, ads_df)
+    with tabs[4]:
+        render_operacional_estoque(filtered, inventory_df, filtered_ads, filter_state, selected_period)
+    with tabs[5]:
+        render_base_completa(filtered)
+
+
+if __name__ == "__main__":
+    main()
