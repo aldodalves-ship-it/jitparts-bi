@@ -1260,7 +1260,14 @@ def load_data(path: str) -> pd.DataFrame:
         ],
     )
 
-    df["date_created"] = pd.to_datetime(df.get("date_created"), errors="coerce", utc=True).dt.tz_convert(APP_TIMEZONE)
+    # Garantir que date_created é sempre uma Series antes de to_datetime
+    _raw_dates = df["date_created"] if "date_created" in df.columns else pd.Series(pd.NaT, index=df.index, dtype="object")
+    _parsed = pd.to_datetime(_raw_dates, errors="coerce", utc=True)
+    # tz_convert só funciona em Series tz-aware; se tudo NaT a Series é tz-naive
+    if hasattr(_parsed.dtype, "tz") and _parsed.dtype.tz is not None:
+        df["date_created"] = _parsed.dt.tz_convert(APP_TIMEZONE)
+    else:
+        df["date_created"] = _parsed.dt.tz_localize("UTC").dt.tz_convert(APP_TIMEZONE) if _parsed.notna().any() else _parsed
     # Proteger .dt contra NaT: só aplica se houver datas válidas
     _date_valid = df["date_created"].notna()
     df["data_ref"] = df["date_created"].where(_date_valid).dt.date if _date_valid.any() else pd.Series(pd.NaT, index=df.index, dtype="object")
