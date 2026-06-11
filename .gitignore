@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Ambientes virtuais
 __pycache__/
 *.py[cod]
@@ -37,3 +38,20 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+=======
+# Ignorar dados locais
+data/
+
+# Banco local
+*.duckdb
+
+# Logs
+logs/
+
+# Arquivos de ambiente
+.env
+
+# Cache python
+__pycache__/
+*.pyc
+>>>>>>> 4fc9cde76df43099c9e6324e589be74941777010

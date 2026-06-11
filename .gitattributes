@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Git LFS para arquivos binários grandes
 data/*.duckdb filter=lfs diff=lfs merge=lfs -text
 data/*.xlsx filter=lfs diff=lfs merge=lfs -text
@@ -8,3 +9,15 @@ data/*.xlsx filter=lfs diff=lfs merge=lfs -text
 *.csv text eol=lf
 *.toml text eol=lf
 *.md text eol=lf
+=======
+# Git LFS para arquivos binários grandes
+data/*.duckdb filter=lfs diff=lfs merge=lfs -text
+data/*.xlsx filter=lfs diff=lfs merge=lfs -text
+
+# Forçar LF nos arquivos Python e texto
+*.py text eol=lf
+*.txt text eol=lf
+*.csv text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+>>>>>>> 4fc9cde76df43099c9e6324e589be74941777010

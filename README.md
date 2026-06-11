@@ -28,6 +28,7 @@ streamlit run app.py
 
 ## Deploy Streamlit Cloud
 
+<<<<<<< HEAD
 1. Suba o repositório no GitHub **sem a pasta `data/`** (os CSVs são gerados automaticamente)
 2. Acesse [share.streamlit.io](https://share.streamlit.io) → conecte o repositório → selecione `app.py`
 3. Em **Settings → Secrets**, adicione:
@@ -62,6 +63,12 @@ ensure_data_ready()
             ├── teste_ml_ads_*.py
             └── merge_ml_seconds.py  → data/dashboard_base_final.csv ✓
 ```
+=======
+1. Suba o repositório no GitHub (sem `data/` pesada — use LFS ou suba os CSVs direto)
+2. Acesse [share.streamlit.io](https://share.streamlit.io)
+3. Conecte o repositório → selecione `app.py`
+4. Configure secrets em **Settings → Secrets** se necessário
+>>>>>>> 4fc9cde76df43099c9e6324e589be74941777010
 
 ## Dados
 
