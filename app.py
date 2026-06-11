@@ -8961,13 +8961,23 @@ def render_visao_geral_executiva(
 
 
 def month_label_pt(value: object) -> str:
-    period = pd.Period(value, freq="M")
-    return f"{MONTH_NAMES_PT[period.month]}/{period.year}"
+    if value is None or (hasattr(value, '__class__') and value.__class__.__name__ == 'NaTType'):
+        return "N/D"
+    try:
+        period = pd.Period(value, freq="M")
+        return f"{MONTH_NAMES_PT[period.month]}/{period.year}"
+    except Exception:
+        return "N/D"
 
 
 def month_label_short_pt(value: object) -> str:
-    period = pd.Period(value, freq="M")
-    return f"{MONTH_ABBR_PT[period.month]}/{period.year}"
+    if value is None or (hasattr(value, '__class__') and value.__class__.__name__ == 'NaTType'):
+        return "N/D"
+    try:
+        period = pd.Period(value, freq="M")
+        return f"{MONTH_ABBR_PT[period.month]}/{period.year}"
+    except Exception:
+        return "N/D"
 
 
 def signed_br_percent(value: float | int | None, decimals: int = 0) -> str:
@@ -10542,7 +10552,11 @@ def monthly_brand_metrics(df: pd.DataFrame) -> pd.DataFrame:
     data = grid.merge(monthly, on=["Marca", "mes_periodo"], how="left")
     data["faturamento"] = pd.to_numeric(data["faturamento"], errors="coerce").fillna(0.0)
     data["lucro_liquido_estimado"] = pd.to_numeric(data["lucro_liquido_estimado"], errors="coerce").fillna(0.0)
-    data["mes_ref"] = data["mes_periodo"].map(lambda value: pd.Period(value, freq="M").to_timestamp())
+    data["mes_ref"] = data["mes_periodo"].map(
+        lambda value: pd.Period(value, freq="M").to_timestamp()
+        if value is not None and not (hasattr(value, '__class__') and value.__class__.__name__ == 'NaTType')
+        else pd.NaT
+    )
     data = data.sort_values(["Marca", "mes_ref"]).reset_index(drop=True)
     data["receita_anterior"] = data.groupby("Marca")["faturamento"].shift(1).fillna(0.0)
     data["ordem_mes_marca"] = data.groupby("Marca").cumcount()
