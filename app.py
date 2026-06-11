@@ -1261,11 +1261,16 @@ def load_data(path: str) -> pd.DataFrame:
     )
 
     df["date_created"] = pd.to_datetime(df.get("date_created"), errors="coerce", utc=True).dt.tz_convert(APP_TIMEZONE)
-    df["data_ref"] = df["date_created"].dt.date
+    # Proteger .dt contra NaT: só aplica se houver datas válidas
+    _date_valid = df["date_created"].notna()
+    df["data_ref"] = df["date_created"].where(_date_valid).dt.date if _date_valid.any() else pd.Series(pd.NaT, index=df.index, dtype="object")
     df["date"] = df["data_ref"]
-    df["month"] = df["date_created"].dt.tz_localize(None).dt.to_period("M").astype(str)
-    df["weekday"] = df["date_created"].dt.day_name()
-    df["hour"] = df["date_created"].dt.hour
+    df["month"] = (
+        df["date_created"].where(_date_valid).dt.tz_localize(None).dt.to_period("M").astype(str)
+        if _date_valid.any() else "N/D"
+    )
+    df["weekday"] = df["date_created"].where(_date_valid).dt.day_name() if _date_valid.any() else pd.Series("", index=df.index, dtype="object")
+    df["hour"] = df["date_created"].where(_date_valid).dt.hour if _date_valid.any() else pd.Series(0, index=df.index, dtype="int64")
     df["order_id"] = df.get("order_id", pd.Series(index=df.index, dtype="object")).astype(str)
     df["item_id"] = df.get("item_id", pd.Series(index=df.index, dtype="object")).astype(str)
     df["SKU"] = df.get("SKU", pd.Series(index=df.index, dtype="object")).fillna("N/D").astype(str)
@@ -3396,10 +3401,20 @@ def executive_financials_timeseries(
             continue
         if not ads_work.empty and ads_period_column in ads_work.columns:
             if period_column == "month":
-                ads_period = ads_work[ads_work[ads_period_column].dt.to_period("M").astype(str) == str(period)]
+                # Proteger .dt contra NaT na coluna de período
+                _col = pd.to_datetime(ads_work[ads_period_column], errors="coerce")
+                _valid = _col.notna()
+                if _valid.any():
+                    ads_period = ads_work[_col.where(_valid).dt.to_period("M").astype(str) == str(period)]
+                else:
+                    ads_period = ads_work.iloc[0:0]
             else:
                 period_date = pd.to_datetime(period, errors="coerce")
-                ads_period = ads_work[ads_work[ads_period_column].dt.date == period_date.date()] if pd.notna(period_date) else ads_work.iloc[0:0]
+                if pd.notna(period_date) and ads_work[ads_period_column].notna().any():
+                    _col = pd.to_datetime(ads_work[ads_period_column], errors="coerce")
+                    ads_period = ads_work[_col.dt.date == period_date.date()]
+                else:
+                    ads_period = ads_work.iloc[0:0]
         else:
             ads_period = ads_work.iloc[0:0]
         metrics = calculate_executive_financials(group, ads_period)
@@ -8209,7 +8224,9 @@ def product_days_without_sale(financial_df: pd.DataFrame) -> dict[str, int]:
 
     max_date = base["_data_ultima_venda"].max().normalize()
     last_sale = base.groupby("item_id")["_data_ultima_venda"].max()
-    days = (max_date - last_sale.dt.normalize()).dt.days.fillna(0).clip(lower=0)
+    # Proteger .dt.normalize() e .dt.days contra NaT
+    last_sale_ts = pd.to_datetime(last_sale, errors="coerce")
+    days = (max_date - last_sale_ts.where(last_sale_ts.notna())).dt.days.fillna(0).clip(lower=0)
     return days.astype(int).to_dict()
 
 
@@ -8980,7 +8997,8 @@ def log_commercial_debug(
 
     debug = base.copy()
     debug["_data_comercial"] = date_series
-    debug["_mes_comercial"] = debug["_data_comercial"].dt.to_period("M")
+    _dc = pd.to_datetime(debug["_data_comercial"], errors="coerce")
+    debug["_mes_comercial"] = _dc.where(_dc.notna()).dt.to_period("M") if _dc.notna().any() else pd.Series(pd.NaT, index=debug.index, dtype="object")
     valid = debug.dropna(subset=["_mes_comercial"])
     month_counts = valid.groupby("_mes_comercial").size()
     revenue_column = "receita" if "receita" in valid.columns else "faturamento"
@@ -8996,8 +9014,12 @@ def log_commercial_debug(
     base["Marca"] = base["Marca"].fillna("N/D").replace("", "N/D").astype(str)
     date_series, date_column = commercial_sales_date_series(base)
     base["data_venda_comercial"] = date_series
-    base["mes_ref"] = base["data_venda_comercial"].dt.to_period("M").dt.to_timestamp()
-    base["mes_periodo"] = base["mes_ref"].dt.to_period("M")
+    # Proteger .dt contra NaT antes de criar mes_ref e mes_periodo
+    _dvc = pd.to_datetime(base["data_venda_comercial"], errors="coerce")
+    base["data_venda_comercial"] = _dvc
+    _dvc_valid = _dvc.notna()
+    base["mes_ref"] = _dvc.where(_dvc_valid).dt.to_period("M").dt.to_timestamp() if _dvc_valid.any() else pd.Series(pd.NaT, index=base.index)
+    base["mes_periodo"] = pd.to_datetime(base["mes_ref"], errors="coerce").where(base["mes_ref"].notna()).dt.to_period("M") if base["mes_ref"].notna().any() else pd.Series(pd.NaT, index=base.index, dtype="object")
     log_commercial_debug(base, date_column, date_series)
     base = base.dropna(subset=["mes_periodo"])
     if base.empty:
@@ -10452,7 +10474,9 @@ def prepare_stock_executive_base(
     last_sale = sales.dropna(subset=["_data_ultima_venda"]).groupby("item_id")["_data_ultima_venda"].max()
     prepared["_ultima_venda"] = prepared["item_id"].map(last_sale)
     end_ts = pd.Timestamp(end_date)
-    prepared["dias_sem_venda"] = (end_ts - prepared["_ultima_venda"]).dt.days
+    # Proteger subtração de datas contra NaT: fillna com period_days antes de .dt.days
+    _diff = end_ts - pd.to_datetime(prepared["_ultima_venda"], errors="coerce")
+    prepared["dias_sem_venda"] = _diff.dt.days.where(_diff.notna(), other=float(period_days))
     prepared["dias_sem_venda"] = prepared["dias_sem_venda"].fillna(period_days).clip(lower=0)
     return prepared
 
