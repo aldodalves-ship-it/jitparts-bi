@@ -1,38 +1,15 @@
-# Ambientes virtuais
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.venv/
-venv/
-env/
-.env
-.env.local
+# Ignorar dados locais
+data/
 
-# Streamlit
-.streamlit/secrets.toml
+# Banco local
+*.duckdb
 
 # Logs
-*.log
 logs/
 
-# DuckDB (binário grande — usar Git LFS ou regenerar localmente)
-data/*.duckdb
-data/*.wal
+# Arquivos de ambiente
+.env
 
-# Excel com dados sensíveis de custo (regenerado pelo processar_seconds_profitability.py)
-data/seconds/
-data/seconds_cmv.xlsx
-
-# Scripts de auditoria temporários
-_*.py
-_rebuild_ads_tab.py
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDEs
-.vscode/
-.idea/
-*.swp
+# Cache python
+__pycache__/
+*.pyc
