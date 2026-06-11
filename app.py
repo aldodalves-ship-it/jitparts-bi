@@ -1352,11 +1352,11 @@ def load_seconds_official_data(path: str) -> pd.DataFrame:
     df["margem_bruta"] = df["margem_liquida_estimada"]
     df["seconds_period_start"] = period_start
     df["seconds_period_end"] = period_end
-    df["date_created"] = pd.Timestamp(period_start).tz_localize(APP_TIMEZONE)
+    df["date_created"] = pd.Timestamp(period_start).tz_localize(APP_TIMEZONE) if period_start is not None else pd.NaT
     df["data_ref"] = period_start
     df["date"] = period_start
-    df["month"] = f"{period_start:%Y-%m}"
-    df["weekday"] = pd.Timestamp(period_start).day_name()
+    df["month"] = f"{period_start:%Y-%m}" if period_start is not None else "N/D"
+    df["weekday"] = pd.Timestamp(period_start).day_name() if period_start is not None else ""
     df["hour"] = 0
     df["order_id"] = df.get("item_id", pd.Series(index=df.index, dtype="object")).astype(str)
     df["item_id"] = df.get("item_id", pd.Series(index=df.index, dtype="object")).astype(str)
@@ -8138,7 +8138,10 @@ def build_abrupt_product_dropoffs(filtered_sales: pd.DataFrame, top_n: int | Non
     base["link_anuncio"] = base["link_anuncio"].fillna("N/D").astype(str)
     base["parametro_confiavel"] = base["parametro_confiavel"].map(lambda value: safe_bool(value, default=True))
 
-    max_date = base["data_venda_queda"].max().normalize()
+    max_date = base["data_venda_queda"].max()
+    if pd.isna(max_date):
+        return pd.DataFrame(columns=output_columns)
+    max_date = pd.Timestamp(max_date).normalize()
     ultimos_7_inicio = max_date - pd.Timedelta(days=6)
     anteriores_30_inicio = ultimos_7_inicio - pd.Timedelta(days=30)
     anteriores_30_fim = ultimos_7_inicio
@@ -8222,7 +8225,10 @@ def product_days_without_sale(financial_df: pd.DataFrame) -> dict[str, int]:
     if base.empty:
         return {}
 
-    max_date = base["_data_ultima_venda"].max().normalize()
+    _max_raw = base["_data_ultima_venda"].max()
+    if pd.isna(_max_raw):
+        return {}
+    max_date = pd.Timestamp(_max_raw).normalize()
     last_sale = base.groupby("item_id")["_data_ultima_venda"].max()
     # Proteger .dt.normalize() e .dt.days contra NaT
     last_sale_ts = pd.to_datetime(last_sale, errors="coerce")
