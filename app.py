@@ -12674,8 +12674,10 @@ def main() -> None:
             st.rerun()
         return
     except Exception as exc:
-        st.error(f"Erro ao carregar a base: {exc}")
-        return
+        import traceback as _tb
+        st.error(f"**Erro ao carregar a base:** `{type(exc).__name__}: {exc}`")
+        st.code(_tb.format_exc(), language="python")
+        st.stop()
 
     if df.empty:
         st.warning("A base final esta vazia.")
