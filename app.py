@@ -5224,8 +5224,231 @@ def render_financial_goals(
 </style>
 <div class="finance-strategy-subtitle">Metas financeiras</div>
 <div class="finance-goal-grid">{''.join(goal_cards)}</div>
-"""
+    """
     st.markdown(goals_html.strip(), unsafe_allow_html=True)
+
+
+def _friendly_empty_table(message: str = "Sem dados para os filtros atuais.") -> pd.DataFrame:
+    return pd.DataFrame({"Mensagem": [message]})
+
+
+def _display_value(column: str, value: object) -> object:
+    if pd.isna(value):
+        return "N/D"
+
+    lower = str(column).strip().lower()
+    numeric = safe_number(value, default=float("nan"))
+    is_numeric = not pd.isna(numeric)
+    if not is_numeric:
+        return safe_text(value)
+
+    percent_markers = [
+        "%",
+        "margem",
+        "acos",
+        "ctr",
+        "conversao",
+        "crescimento",
+        "participacao",
+        "queda",
+        "cobertura_ads_percentual",
+    ]
+    money_markers = [
+        "receita",
+        "faturamento",
+        "lucro",
+        "cmv",
+        "frete",
+        "imposto",
+        "investimento",
+        "custo",
+        "valor",
+        "impacto",
+        "potencial",
+        "capital",
+        "ticket",
+        "price",
+        "preco",
+    ]
+    count_markers = [
+        "estoque",
+        "pedidos",
+        "quantidade",
+        "unidades",
+        "vendidos",
+        "cliques",
+        "clicks",
+        "impressoes",
+        "impressions",
+        "dias",
+    ]
+
+    if "roas" in lower:
+        return br_number(numeric, 2)
+    if any(marker in lower for marker in percent_markers):
+        return br_percent(numeric)
+    if any(marker in lower for marker in money_markers):
+        return br_money(numeric)
+    if any(marker in lower for marker in count_markers):
+        return br_number(numeric, 0)
+    return br_number(numeric, 2)
+
+
+def format_table(df: pd.DataFrame, empty_message: str = "Sem dados para os filtros atuais.") -> pd.DataFrame:
+    if df is None or df.empty:
+        return _friendly_empty_table(empty_message)
+
+    display = df.copy()
+    for column in display.columns:
+        display[column] = display[column].map(lambda value, col=column: _display_value(col, value))
+    return display
+
+
+def _executive_table_style(display: pd.DataFrame, color_fn):
+    if display.empty:
+        display = _friendly_empty_table()
+
+    def color_row(row: pd.Series) -> list[str]:
+        color = color_fn(row)
+        return [color] * len(row)
+
+    return (
+        display.style.apply(color_row, axis=1)
+        .set_properties(
+            **{
+                "background-color": "rgba(15, 23, 42, .72)",
+                "color": "#E2E8F0",
+                "border": "1px solid rgba(148, 163, 184, .18)",
+                "font-weight": "650",
+            }
+        )
+        .set_table_styles(
+            [
+                {
+                    "selector": "th",
+                    "props": [
+                        ("background-color", "rgba(15, 23, 42, .96)"),
+                        ("color", "#F8FAFC"),
+                        ("font-weight", "850"),
+                        ("border", "1px solid rgba(148, 163, 184, .22)"),
+                    ],
+                },
+                {
+                    "selector": "td",
+                    "props": [("border", "1px solid rgba(148, 163, 184, .16)")],
+                },
+            ]
+        )
+    )
+
+
+def _priority_row_style(row: pd.Series) -> str:
+    text = " ".join(safe_text(value) for value in row.to_dict().values()).lower()
+    if any(token in text for token in ["crítica", "critica", "crítico", "critico", "alta", "zerado", "negativa"]):
+        return "background-color: rgba(220, 38, 38, .18); color: #FECACA; font-weight: 800;"
+    if any(token in text for token in ["média", "media", "atenção", "atencao", "baixo", "alto", "revisar"]):
+        return "background-color: rgba(217, 119, 6, .16); color: #FED7AA; font-weight: 760;"
+    if any(token in text for token in ["oportunidade", "saudável", "saudavel", "verde", "escalar", "comprar"]):
+        return "background-color: rgba(15, 118, 110, .18); color: #BBF7D0; font-weight: 760;"
+    return "background-color: rgba(15, 23, 42, .72); color: #E2E8F0; font-weight: 650;"
+
+
+def style_executive_alerts(df: pd.DataFrame):
+    display = format_table(df, "Sem alertas para os filtros atuais.")
+    return _executive_table_style(display, _priority_row_style)
+
+
+def style_recommended_actions(df: pd.DataFrame):
+    display = format_table(df, "Sem ações recomendadas para os filtros atuais.")
+    return _executive_table_style(display, _priority_row_style)
+
+
+def style_action_plan(df: pd.DataFrame):
+    display = format_table(df, "Sem plano de ação para os filtros atuais.")
+    return _executive_table_style(display, _priority_row_style)
+
+
+def style_curva_a_risk(df: pd.DataFrame):
+    display = format_table(df, "Sem itens da Curva A em risco para os filtros atuais.")
+    return _executive_table_style(display, _priority_row_style)
+
+
+def style_stock_alerts(df: pd.DataFrame):
+    display = format_table(df, "Sem alertas de estoque para os filtros atuais.")
+    return _executive_table_style(display, _priority_row_style)
+
+
+def render_historico_tendencias(selected_period: tuple[date, date] | None = None) -> None:
+    if selected_period:
+        start_date, end_date = selected_period
+        st.info(f"Histórico executivo indisponível para {start_date:%d/%m/%Y} a {end_date:%d/%m/%Y}.")
+    else:
+        st.info("Histórico executivo indisponível para os filtros atuais.")
+
+
+def render_plano_acao(alerts: pd.DataFrame) -> None:
+    if alerts is None or alerts.empty:
+        st.info("Nenhuma ação operacional sugerida para os filtros atuais.")
+        return
+    columns = [
+        "prioridade",
+        "tipo_alerta",
+        "acao_recomendada",
+        "responsavel_sugerido",
+        "prazo_sugerido",
+        "impacto_financeiro_estimado",
+        "produto",
+        "marca",
+        "estoque",
+        "LinkAnuncio",
+    ]
+    visible = [column for column in columns if column in alerts.columns]
+    st.dataframe(
+        style_action_plan(alerts[visible] if visible else alerts),
+        use_container_width=True,
+        hide_index=True,
+        height=360,
+    )
+
+
+def render_financeiro_executivo(
+    financial_df: pd.DataFrame,
+    ads_df: pd.DataFrame,
+    selected_period: tuple[date, date] | None,
+    financial_comparison_base: pd.DataFrame | None = None,
+    all_ads_df: pd.DataFrame | None = None,
+) -> None:
+    if financial_df is None or financial_df.empty:
+        st.info("Sem dados financeiros para os filtros atuais.")
+        return
+
+    current = financial_period_summary(financial_df, ads_df, selected_period, all_ads_df)
+    previous = None
+    prev_period = previous_period(selected_period)
+    if prev_period and financial_comparison_base is not None and not financial_comparison_base.empty:
+        previous_financial = filter_financial_period(financial_comparison_base, prev_period)
+        previous_ads = (
+            filter_ads_by_period(all_ads_df, prev_period)[0]
+            if all_ads_df is not None and not all_ads_df.empty
+            else pd.DataFrame()
+        )
+        if not previous_financial.empty:
+            previous = financial_period_summary(previous_financial, previous_ads, prev_period, all_ads_df)
+
+    historical = historical_summary(financial_comparison_base, all_ads_df)
+    daily = executive_financials_timeseries(financial_df, ads_df, "date")
+
+    render_comparativo_periodo(current, previous)
+    render_saude_financeira(current, previous, financial_comparison_base)
+    render_executive_strategy_layer(current, previous, historical, selected_period, daily)
+    render_horizontal_financial_funnel(current)
+    render_dre_executiva(current)
+
+    col1, col2 = st.columns(2)
+    col1.plotly_chart(financial_revenue_result_chart(daily), use_container_width=True)
+    col2.plotly_chart(financial_cost_pressure_chart(daily), use_container_width=True)
+    render_financial_insights(current, previous)
+    render_financial_audit_expander(financial_df)
 
 
 def format_period(period: tuple[date, date] | None) -> str:
@@ -9032,9 +9255,16 @@ def log_commercial_debug(
     )
 
     if revenue is not None:
-        pass  # log removido para producao(df: pd.DataFrame) -> tuple[pd.DataFrame, list[pd.Period], dict[pd.Period, str]]:
+        pass  # log removido para producao
+
+
+def commercial_monthly_base(df: pd.DataFrame) -> tuple[pd.DataFrame, list[pd.Period], dict[pd.Period, str]]:
+    if df.empty:
+        return pd.DataFrame(), [], {}
     base = df.copy()
+    base = ensure_columns(base, {"Marca": "N/D", "receita": 0.0, "lucro_liquido_estimado": 0.0})
     base["Marca"] = base["Marca"].fillna("N/D").replace("", "N/D").astype(str)
+    base = safe_numeric(base, ["receita", "lucro_liquido_estimado"])
     date_series, date_column = commercial_sales_date_series(base)
     base["data_venda_comercial"] = date_series
     # Proteger .dt contra NaT antes de criar mes_ref e mes_periodo
