@@ -38,6 +38,7 @@ UPDATE_SCRIPT_PATH = Path("atualizar_dashboard.py")
 LAST_RUN_LOG_PATH = Path("logs/ultima_execucao.log")
 DUCKDB_PATH = Path("data/jitparts.duckdb")
 APP_TIMEZONE = "America/Sao_Paulo"
+ORDER_ID_COLUMNS = ["order_id", "id_pedido", "pedido_id", "Pedido", "pedido"]
 FINANCIAL_MODE_OFFICIAL = "Seconds Oficial"
 FINANCIAL_MODE_HYBRID = "Estimativa Híbrida ML + Seconds"
 SECONDS_OFFICIAL_FALLBACK_PERIOD = (date(2026, 5, 4), date(2026, 5, 8))
@@ -1191,9 +1192,10 @@ def run_dashboard_update() -> subprocess.CompletedProcess[str]:
 
 
 @st.cache_data(show_spinner="Carregando base executiva...")
-def load_data(path: str) -> pd.DataFrame:
+def load_data(path: str, file_signature: str | None = None) -> pd.DataFrame:
     """Carrega e prepara a base final do dashboard."""
 
+    _ = file_signature
     csv_path = Path(path)
     if not csv_path.exists():
         raise FileNotFoundError(
@@ -1564,6 +1566,96 @@ def first_existing_column(df: pd.DataFrame, candidates: Iterable[str]) -> str | 
         if column in df.columns:
             return column
     return None
+
+
+def file_cache_signature(path: Path) -> str:
+    """Assinatura simples para invalidar st.cache_data quando o CSV muda."""
+
+    resolved = path.resolve()
+    if not resolved.exists():
+        return f"{resolved}|missing"
+    stat = resolved.stat()
+    return f"{resolved}|{stat.st_mtime_ns}|{stat.st_size}"
+
+
+def order_reference_series(df: pd.DataFrame) -> tuple[pd.Series, str]:
+    """Retorna a melhor serie para contagem de pedidos, sem alterar dados financeiros."""
+
+    if df.empty:
+        return pd.Series(dtype="object"), "indisponivel"
+
+    for column in ORDER_ID_COLUMNS:
+        if column not in df.columns:
+            continue
+        refs = df[column].astype("string").str.strip()
+        refs = refs.mask(refs.str.lower().isin({"", "nan", "none", "nat", "<na>", "n/d"}))
+        if refs.notna().any():
+            return refs, column
+
+    return pd.Series(df.index.astype(str), index=df.index, dtype="object"), "indice_linha_fallback"
+
+
+def count_orders(df: pd.DataFrame) -> int:
+    refs, _ = order_reference_series(df)
+    return int(refs.nunique(dropna=True)) if not refs.empty else 0
+
+
+def debug_dashboard_loaded_dates(df: pd.DataFrame) -> None:
+    """Imprime a auditoria pedida para DATA_PATH, datas e pedidos recentes."""
+
+    print("[DEBUG DATA DISPONIVEL] DATA_PATH_ABSOLUTO=", safe_debug_value(str(DATA_PATH.resolve())))
+    if df.empty:
+        print("[DEBUG DATA DISPONIVEL] dataframe vazio apos load_data")
+        return
+
+    data_ref = pd.to_datetime(df.get("data_ref", pd.Series(dtype="object")), errors="coerce")
+    date_created = pd.to_datetime(df.get("date_created", pd.Series(dtype="object")), errors="coerce")
+    data_ref_dates = data_ref.dt.date.dropna()
+    print(
+        "[DEBUG DATA DISPONIVEL] data_ref_min_max_apos_load_data=",
+        safe_debug_value(data_ref_dates.min() if not data_ref_dates.empty else "N/D"),
+        safe_debug_value(data_ref_dates.max() if not data_ref_dates.empty else "N/D"),
+    )
+    print(
+        "[DEBUG DATA DISPONIVEL] date_created_min_max_apos_load_data=",
+        safe_debug_value(date_created.min() if date_created.notna().any() else "N/D"),
+        safe_debug_value(date_created.max() if date_created.notna().any() else "N/D"),
+    )
+
+    refs, order_column = order_reference_series(df)
+    print("[DEBUG DATA DISPONIVEL] coluna_usada_para_pedidos=", safe_debug_value(order_column))
+    if data_ref_dates.empty:
+        return
+
+    work = df.copy()
+    work["_debug_data_ref"] = data_ref.dt.date
+    work["_debug_receita"] = pd.to_numeric(work.get("receita", 0), errors="coerce").fillna(0)
+    work["_debug_pedido"] = refs.reindex(work.index)
+    start = date(2026, 6, 10)
+    end = date(2026, 6, 16)
+    mask = (work["_debug_data_ref"] >= start) & (work["_debug_data_ref"] <= end)
+    recent = (
+        work.loc[mask]
+        .groupby("_debug_data_ref", as_index=False)
+        .agg(
+            linhas=("_debug_data_ref", "size"),
+            faturamento=("_debug_receita", "sum"),
+            pedidos=("_debug_pedido", "nunique"),
+        )
+        .sort_values("_debug_data_ref")
+    )
+    print("[DEBUG DATA DISPONIVEL] linhas_faturamento_pedidos_10_16_06=")
+    for row in recent.to_dict("records"):
+        print(
+            "[DEBUG DATA DISPONIVEL]",
+            safe_debug_value(row["_debug_data_ref"]),
+            "linhas=",
+            int(row["linhas"]),
+            "faturamento=",
+            f"{float(row['faturamento']):.2f}",
+            "pedidos=",
+            int(row["pedidos"]),
+        )
 
 
 def ads_audit_match_debug(
@@ -3446,7 +3538,7 @@ def executive_financials_timeseries(
                 "full_pct": metrics["full_pct"],
                 "devolucao_pct": metrics["devolucao_pct"],
                 "outras_taxas_pct": metrics["outras_taxas_pct"],
-                "pedidos": group["order_id"].nunique() if "order_id" in group.columns else len(group),
+                "pedidos": count_orders(group),
             }
         )
     return pd.DataFrame(rows).sort_values(period_column)
@@ -3729,7 +3821,7 @@ def financial_period_summary(
     historical_ads_df: pd.DataFrame | None = None,
 ) -> dict[str, object]:
     metrics = calculate_executive_financials(financial_df, ads_df, period, historical_ads_df)
-    pedidos = int(financial_df["order_id"].nunique()) if "order_id" in financial_df.columns and not financial_df.empty else 0
+    pedidos = count_orders(financial_df)
     ticket = float(metrics["receita"]) / pedidos if pedidos else 0.0
     receita = float(metrics["receita"] or 0.0)
     return {
@@ -6272,14 +6364,16 @@ def empty_fig(title: str) -> go.Figure:
 def daily_summary(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
+    work = df.copy()
+    work["_pedido_ref"] = order_reference_series(work)[0].reindex(work.index)
     daily = (
-        df.groupby("date", as_index=False)
+        work.groupby("date", as_index=False)
         .agg(
             receita=("receita", "sum"),
             lucro_liquido_estimado=("lucro_liquido_estimado", "sum"),
             lucro_operacional=("lucro_operacional", "sum"),
             lucro_bruto=("lucro_bruto", "sum"),
-            pedidos=("order_id", "nunique"),
+            pedidos=("_pedido_ref", "nunique"),
             cmv=("CMV total", "sum"),
             comissao=("sale_fee", "sum"),
             frete=("custo_frete_final", "sum"),
@@ -6319,15 +6413,17 @@ def ads_daily_summary(ads_df: pd.DataFrame) -> pd.DataFrame:
 def dimension_summary(df: pd.DataFrame, dimension: str, top_n: int = 15) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
+    work = df.copy()
+    work["_pedido_ref"] = order_reference_series(work)[0].reindex(work.index)
     grouped = (
-        df.groupby(dimension, dropna=False, as_index=False)
+        work.groupby(dimension, dropna=False, as_index=False)
         .agg(
             receita=("receita", "sum"),
             lucro_liquido_estimado=("lucro_liquido_estimado", "sum"),
             lucro_operacional=("lucro_operacional", "sum"),
             lucro_bruto=("lucro_bruto", "sum"),
             cmv=("CMV total", "sum"),
-            pedidos=("order_id", "nunique"),
+            pedidos=("_pedido_ref", "nunique"),
             quantidade=("quantity", "sum"),
             ticket=("receita", "mean"),
         )
@@ -6345,8 +6441,10 @@ def dimension_summary(df: pd.DataFrame, dimension: str, top_n: int = 15) -> pd.D
 def product_summary(df: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
+    work = df.copy()
+    work["_pedido_ref"] = order_reference_series(work)[0].reindex(work.index)
     grouped = (
-        df.groupby(["item_id", "SKU", "produto", "Marca", "Nome da Categoria", "FULL", "Flex"], dropna=False, as_index=False)
+        work.groupby(["item_id", "SKU", "produto", "Marca", "Nome da Categoria", "FULL", "Flex"], dropna=False, as_index=False)
         .agg(
             receita=("receita", "sum"),
             CMV=("CMV total", "sum"),
@@ -6354,7 +6452,7 @@ def product_summary(df: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
             lucro_operacional=("lucro_operacional", "sum"),
             lucro_bruto=("lucro_bruto", "sum"),
             quantidade=("quantity", "sum"),
-            pedidos=("order_id", "nunique"),
+            pedidos=("_pedido_ref", "nunique"),
             cmv_unitario=("cmv_seconds", "mean"),
         )
         .sort_values("receita", ascending=False)
@@ -9048,7 +9146,7 @@ def render_visao_geral_executiva(
     financials = calculate_executive_financials(financial_df, ads_df, selected_period)
     ads_kpis = calculate_ads_kpis(ads_df)
     faturamento = financials["receita"]
-    pedidos = int(financial_df["order_id"].nunique()) if "order_id" in financial_df.columns else 0
+    pedidos = count_orders(financial_df)
     ticket = faturamento / pedidos if pedidos else 0.0
     high_priority_count = int((all_alerts["prioridade"] == "Alta").sum()) if not all_alerts.empty else 0
     result_status = result_operational_status(financials["resultado_operacional_pct"])
@@ -10618,11 +10716,71 @@ STOCK_KPI_TOOLTIPS = {
         "Formula: alertas operacionais com nivel critico ou prioridade alta. Meta: zero. "
         "Interpretacao: fila executiva de risco. Acao: tratar os primeiros itens do plano de acao."
     ),
+    "Produtos em ruptura critica": (
+        "Definicao: produtos com consumo medio historico e cobertura ate 7 dias. "
+        "Formula: estoque_atual / venda_media_diaria. Interpretacao: risco imediato de parar venda. "
+        "Acao sugerida: compra urgente ou pausa do anuncio."
+    ),
+    "Receita em risco": (
+        "Definicao: faturamento potencial exposto por baixa cobertura. "
+        "Formula: receita_media_diaria x dias projetados sem estoque. "
+        "Interpretacao: valor que pode deixar de vender se nao houver reposicao. Acao sugerida: priorizar compras por impacto."
+    ),
+    "Produtos em risco alto": (
+        "Definicao: produtos com cobertura entre 8 e 15 dias. Formula: estoque_atual / venda_media_diaria. "
+        "Interpretacao: risco relevante no proximo ciclo. Acao sugerida: planejar compra de curto prazo."
+    ),
+    "Dias medios de cobertura": (
+        "Definicao: media de dias de estoque dos produtos com venda. Formula: media de estoque_atual / venda_media_diaria. "
+        "Interpretacao: mostra o folego operacional. Acao sugerida: equilibrar entre ruptura e excesso."
+    ),
+    "Capital necessario": (
+        "Definicao: valor estimado para repor produtos no horizonte escolhido. "
+        "Formula: compra_sugerida x valor_unitario_estimado. Interpretacao: caixa requerido para a compra. "
+        "Acao sugerida: comparar com receita em risco e capital parado."
+    ),
+    "Produtos envolvidos": (
+        "Definicao: itens com necessidade de compra no horizonte escolhido. Formula: contagem de compra_sugerida > 0. "
+        "Interpretacao: volume operacional da reposicao. Acao sugerida: priorizar maior impacto financeiro."
+    ),
+    "Cobertura projetada": (
+        "Definicao: cobertura media depois da compra sugerida. Formula: (estoque_atual + compra_sugerida) / venda_media_diaria. "
+        "Interpretacao: dias esperados apos reposicao. Acao sugerida: ajustar horizonte de compra."
+    ),
+    "Compra 30 dias": (
+        "Definicao: unidades recomendadas para cobrir 30 dias. "
+        "Formula: max(0, venda_media_diaria x 30 - estoque_atual). "
+        "Interpretacao: reposicao de curto prazo. Acao sugerida: comprar primeiro os itens com maior impacto financeiro."
+    ),
+    "Compra 60 dias": (
+        "Definicao: unidades recomendadas para cobrir 60 dias. "
+        "Formula: max(0, venda_media_diaria x 60 - estoque_atual). "
+        "Interpretacao: reposicao de ciclo medio. Acao sugerida: validar caixa e fornecedor antes da compra."
+    ),
+    "Compra 90 dias": (
+        "Definicao: unidades recomendadas para cobrir 90 dias. "
+        "Formula: max(0, venda_media_diaria x 90 - estoque_atual). "
+        "Interpretacao: reposicao de ciclo longo. Acao sugerida: usar apenas para marcas com demanda sustentada."
+    ),
+    "Excesso critico": (
+        "Definicao: produtos com cobertura extrema ou longo periodo sem venda. "
+        "Formula: cobertura > 365 dias ou sem venda > 180 dias. "
+        "Interpretacao: alto risco de capital preso. Acao sugerida: liquidar, pausar compras e revisar preco."
+    ),
 }
 
 STOCK_SECTION_TOOLTIPS = {
     "Score Saude do Estoque": STOCK_KPI_TOOLTIPS["Score Saude do Estoque"],
     "Resumo Executivo": "KPIs de decisao para ruptura, capital parado, cobertura e criticidade do estoque.",
+    "Risco de Ruptura": "Estimativa baseada no consumo medio historico. Formula: estoque_atual / venda_media_diaria.",
+    "Compras Prioritarias": "Produtos ordenados pelo maior impacto financeiro estimado da reposicao.",
+    "Capital Parado Avancado": "Capital imobilizado por faixas de produtos sem venda: 30, 60, 90 e 180 dias.",
+    "Estoque Excedente": "Detector de excesso por cobertura acima de 180 dias ou sem venda acima de 90 dias.",
+    "Matriz de Reposicao": "Eixo X = dias de cobertura; eixo Y = crescimento da marca/produto. Define comprar, monitorar, excesso e liquidar.",
+    "Curva ABC de Estoque": "Classificacao A/B/C por participacao acumulada em faturamento e capital investido.",
+    "Planejamento de Compras": "Simulador de capital necessario, produtos envolvidos e cobertura projetada para 30, 60 ou 90 dias.",
+    "Receita em Risco": "Top produtos que podem parar de vender por ruptura, calculados por receita media diaria e dias sem cobertura.",
+    "Insights Automaticos": "Leituras automaticas sobre crescimento, baixa cobertura, capital parado e receita em risco.",
     "Crescimento por Marca": (
         "Heatmap mensal usando a mesma logica de crescimento por marca da visao comercial. "
         "Meta: crescimento mensal minimo de 5%."
@@ -10713,11 +10871,27 @@ def prepare_stock_executive_base(
     prepared["capital_parado"] = prepared["estoque_atual"] * prepared["valor_unitario_estimado"]
     start_date, end_date = selected_period
     period_days = max((end_date - start_date).days + 1, 1)
+    prepared["receita"] = pd.to_numeric(prepared.get("receita", 0), errors="coerce").fillna(0)
     prepared["venda_media_diaria"] = prepared["quantidade_periodo"] / period_days
     prepared["cobertura_dias"] = prepared.apply(
         lambda row: row["estoque_atual"] / row["venda_media_diaria"] if row["venda_media_diaria"] > 0 else 999.0,
         axis=1,
     )
+    prepared["receita_media_diaria"] = prepared["receita"] / period_days
+    prepared["dias_cobertura"] = prepared["cobertura_dias"]
+    prepared["dias_projetados_sem_estoque"] = (30 - prepared["cobertura_dias"]).clip(lower=0, upper=30)
+    prepared.loc[prepared["venda_media_diaria"] <= 0, "dias_projetados_sem_estoque"] = 0
+    prepared["receita_em_risco"] = prepared["receita_media_diaria"] * prepared["dias_projetados_sem_estoque"]
+    for column in [
+        "venda_media_diaria",
+        "receita_media_diaria",
+        "cobertura_dias",
+        "dias_cobertura",
+        "dias_projetados_sem_estoque",
+        "receita_em_risco",
+        "capital_parado",
+    ]:
+        prepared[column] = pd.to_numeric(prepared[column], errors="coerce").replace([float("inf"), -float("inf")], 0).fillna(0)
     if filtered_sales.empty or "item_id" not in filtered_sales.columns:
         prepared["dias_sem_venda"] = period_days
         return prepared
@@ -11349,8 +11523,13 @@ def render_stock_exec_css() -> None:
 .stock-alert-severity{color:var(--alert-color);font-size:.68rem;text-transform:uppercase;font-weight:900;margin-bottom:.35rem;}
 .stock-alert-title{color:rgba(226,232,240,.96);font-weight:900;line-height:1.22;margin-bottom:.35rem;}
 .stock-alert-detail{color:rgba(148,163,184,.98);font-size:.8rem;font-weight:680;line-height:1.35;}
+.stock-band-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.75rem;margin-bottom:1rem;}
+.stock-band-card{border:1px solid rgba(148,163,184,.18);border-radius:8px;padding:.82rem .9rem;background:rgba(15,23,42,.18);min-height:112px;}
+.stock-band-label{color:rgba(148,163,184,.95);font-size:.72rem;font-weight:900;text-transform:uppercase;}
+.stock-band-value{color:rgba(226,232,240,.98);font-size:1.16rem;font-weight:950;margin-top:.32rem;}
+.stock-band-detail{color:rgba(148,163,184,.94);font-size:.76rem;font-weight:720;margin-top:.25rem;}
 .mini-title{color:rgba(226,232,240,.96);font-size:.82rem;font-weight:950;text-transform:uppercase;margin:.15rem 0 .45rem;}
-@media(max-width:900px){.stock-score-layout,.stock-kpi-grid{grid-template-columns:1fr;}}
+@media(max-width:900px){.stock-score-layout,.stock-kpi-grid,.stock-band-grid{grid-template-columns:1fr;}}
 </style>
         """,
         unsafe_allow_html=True,
@@ -11588,6 +11767,492 @@ def build_intelligent_stock_alerts(
     return alerts[:7]
 
 
+def stock_with_brand_growth(stock: pd.DataFrame, matrix: pd.DataFrame) -> pd.DataFrame:
+    if stock.empty:
+        return stock.copy()
+    enriched = stock.copy()
+    if not matrix.empty and {"Marca", "crescimento"}.issubset(matrix.columns):
+        growth_map = dict(
+            zip(
+                matrix["Marca"].astype(str),
+                pd.to_numeric(matrix["crescimento"], errors="coerce").fillna(0),
+            )
+        )
+        enriched["crescimento_marca"] = enriched["marca_final"].astype(str).map(growth_map).fillna(0)
+    else:
+        enriched["crescimento_marca"] = 0.0
+    for column in [
+        "estoque_atual",
+        "venda_media_diaria",
+        "cobertura_dias",
+        "receita",
+        "receita_media_diaria",
+        "receita_em_risco",
+        "capital_parado",
+        "dias_sem_venda",
+        "valor_unitario_estimado",
+        "crescimento_marca",
+    ]:
+        if column in enriched.columns:
+            enriched[column] = (
+                pd.to_numeric(enriched[column], errors="coerce")
+                .replace([float("inf"), -float("inf")], 0)
+                .fillna(0)
+            )
+    return enriched
+
+
+def rupture_risk_level(coverage_days: float, daily_sales: float) -> str:
+    if daily_sales <= 0:
+        return "Baixo"
+    if coverage_days <= 7:
+        return "Critico"
+    if coverage_days <= 15:
+        return "Alto"
+    if coverage_days <= 30:
+        return "Medio"
+    return "Baixo"
+
+
+def build_rupture_risk(stock: pd.DataFrame) -> pd.DataFrame:
+    if stock.empty:
+        return pd.DataFrame()
+    risk = stock.copy()
+    risk["risco_ruptura"] = risk.apply(
+        lambda row: rupture_risk_level(
+            safe_number(row.get("cobertura_dias"), 999),
+            safe_number(row.get("venda_media_diaria"), 0),
+        ),
+        axis=1,
+    )
+    risk["receita_em_risco"] = pd.to_numeric(risk.get("receita_em_risco", 0), errors="coerce").fillna(0)
+    risk["dias_cobertura"] = pd.to_numeric(risk.get("cobertura_dias", 0), errors="coerce").fillna(0).clip(upper=999)
+    risk["ordem_risco"] = risk["risco_ruptura"].map({"Critico": 0, "Alto": 1, "Medio": 2, "Baixo": 3}).fillna(4)
+    return risk.sort_values(["ordem_risco", "receita_em_risco"], ascending=[True, False])
+
+
+def build_purchase_recommendations(stock: pd.DataFrame, horizon_days: int = 30) -> pd.DataFrame:
+    if stock.empty:
+        return pd.DataFrame()
+    base = stock.copy()
+    for horizon in [30, 60, 90]:
+        base[f"compra_{horizon}"] = (
+            (base["venda_media_diaria"].fillna(0) * horizon) - base["estoque_atual"].fillna(0)
+        ).clip(lower=0)
+    selected = f"compra_{horizon_days}"
+    base["compra_sugerida"] = base[selected]
+    base["impacto_faturamento"] = base["compra_sugerida"] * base["valor_unitario_estimado"].fillna(0)
+    base = base[(base["compra_sugerida"] > 0) & (base["venda_media_diaria"].fillna(0) > 0)].copy()
+    return base.sort_values("impacto_faturamento", ascending=False)
+
+
+def format_purchase_recommendations_table(recommendations: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
+    if recommendations.empty:
+        return pd.DataFrame()
+    view = recommendations.head(top_n)[
+        [
+            "produto_final",
+            "marca_final",
+            "estoque_atual",
+            "cobertura_dias",
+            "compra_sugerida",
+            "impacto_faturamento",
+        ]
+    ].rename(
+        columns={
+            "produto_final": "Produto",
+            "marca_final": "Marca",
+            "estoque_atual": "Estoque",
+            "cobertura_dias": "Cobertura",
+            "compra_sugerida": "Compra sugerida",
+            "impacto_faturamento": "Impacto faturamento",
+        }
+    )
+    view["Estoque"] = view["Estoque"].map(lambda value: br_number(value, 0))
+    view["Cobertura"] = view["Cobertura"].map(lambda value: f"{br_number(min(safe_number(value), 999), 1)} dias")
+    view["Compra sugerida"] = view["Compra sugerida"].map(lambda value: br_number(value, 0))
+    view["Impacto faturamento"] = view["Impacto faturamento"].map(br_money)
+    return view
+
+
+def build_capital_idle_bands(stock: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    if stock.empty:
+        return pd.DataFrame(columns=["Faixa", "Capital parado", "Produtos"])
+    active_stock = stock[stock["estoque_atual"].fillna(0) > 0].copy()
+    for threshold in [30, 60, 90, 180]:
+        segment = active_stock[active_stock["dias_sem_venda"].fillna(0) >= threshold]
+        rows.append(
+            {
+                "Faixa": f"{threshold}+ dias",
+                "Capital parado": float(segment["capital_parado"].fillna(0).sum()),
+                "Produtos": int(segment["item_id"].nunique()) if "item_id" in segment.columns else int(len(segment)),
+                "_threshold": threshold,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def capital_idle_bands_chart(bands: pd.DataFrame) -> go.Figure:
+    title = "Capital parado por faixa sem venda"
+    if bands.empty:
+        return empty_fig(title)
+    chart = bands.copy()
+    chart["capital_fmt"] = chart["Capital parado"].map(br_money)
+    fig = go.Figure(
+        go.Bar(
+            x=chart["Faixa"],
+            y=chart["Capital parado"],
+            marker_color=["#0F766E", "#D97706", "#DC2626", "#7C2D12"],
+            customdata=chart[["capital_fmt", "Produtos"]],
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Capital parado: %{customdata[0]}<br>"
+                "Produtos: %{customdata[1]}<br>"
+                "Definicao: produtos com estoque e sem venda no minimo na faixa indicada.<br>"
+                "Formula: soma de estoque_atual x valor unitario estimado.<br>"
+                "Acao sugerida: revisar compra, promocao ou liquidacao.<extra></extra>"
+            ),
+        )
+    )
+    fig.update_yaxes(title_text="Capital parado")
+    return layout_chart(fig, title, 360)
+
+
+def build_excess_stock(stock: pd.DataFrame) -> pd.DataFrame:
+    if stock.empty:
+        return pd.DataFrame()
+    base = stock.copy()
+    base["estoque_excedente_unid"] = (
+        base["estoque_atual"].fillna(0) - (base["venda_media_diaria"].fillna(0) * 90)
+    ).clip(lower=0)
+    base["capital_empatado"] = base["estoque_excedente_unid"] * base["valor_unitario_estimado"].fillna(0)
+    base.loc[base["venda_media_diaria"].fillna(0) <= 0, "capital_empatado"] = base["capital_parado"].fillna(0)
+    base["receita_potencial_perdida"] = base["capital_empatado"]
+    excess = base[
+        (base["cobertura_dias"].fillna(0) > 180)
+        | (base["dias_sem_venda"].fillna(0) > 90)
+    ].copy()
+    if excess.empty:
+        return excess
+
+    def classify(row: pd.Series) -> tuple[str, str]:
+        coverage = safe_number(row.get("cobertura_dias"), 0)
+        days_no_sale = safe_number(row.get("dias_sem_venda"), 0)
+        if coverage > 365 or days_no_sale > 180:
+            return "Excesso critico", "Liquidar, pausar compra e revisar preco imediatamente."
+        if coverage > 270 or days_no_sale > 120:
+            return "Excesso alto", "Reduzir compra, criar oferta e medir giro semanal."
+        return "Excesso moderado", "Monitorar compra e ativar promocao seletiva."
+
+    classified = excess.apply(classify, axis=1, result_type="expand")
+    excess["classificacao_excesso"] = classified[0]
+    excess["acao_sugerida"] = classified[1]
+    return excess.sort_values("capital_empatado", ascending=False)
+
+
+def format_excess_stock_table(excess: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
+    if excess.empty:
+        return pd.DataFrame()
+    view = excess.head(top_n)[
+        [
+            "produto_final",
+            "marca_final",
+            "cobertura_dias",
+            "dias_sem_venda",
+            "capital_empatado",
+            "receita_potencial_perdida",
+            "classificacao_excesso",
+            "acao_sugerida",
+        ]
+    ].rename(
+        columns={
+            "produto_final": "Produto",
+            "marca_final": "Marca",
+            "cobertura_dias": "Cobertura",
+            "dias_sem_venda": "Dias sem venda",
+            "capital_empatado": "Capital empatado",
+            "receita_potencial_perdida": "Receita potencial perdida",
+            "classificacao_excesso": "Classificacao",
+            "acao_sugerida": "Acao sugerida",
+        }
+    )
+    view["Cobertura"] = view["Cobertura"].map(lambda value: f"{br_number(min(safe_number(value), 999), 0)} dias")
+    view["Dias sem venda"] = view["Dias sem venda"].map(lambda value: br_number(value, 0))
+    view["Capital empatado"] = view["Capital empatado"].map(br_money)
+    view["Receita potencial perdida"] = view["Receita potencial perdida"].map(br_money)
+    return view
+
+
+def classify_replenishment(row: pd.Series) -> tuple[str, str, str]:
+    coverage = safe_number(row.get("cobertura_dias"), 999)
+    growth = safe_number(row.get("crescimento_marca"), 0)
+    if coverage <= 30 and growth >= 0:
+        return "Comprar Agora", "#22C55E", "Baixa cobertura com demanda positiva; priorizar compra."
+    if coverage <= 90 and growth >= 0:
+        return "Monitorar", "#2563EB", "Cobertura controlada; comprar apenas se a demanda acelerar."
+    if coverage > 180 and growth >= 0:
+        return "Excesso Estoque", "#D97706", "Cobertura acima de 180 dias; segurar compra."
+    if coverage > 90 and growth < 0:
+        return "Liquidar", "#DC2626", "Crescimento negativo com cobertura alta; reduzir capital preso."
+    return "Monitorar", "#64748B", "Sem sinal extremo; acompanhar proximo ciclo."
+
+
+def build_replenishment_matrix(stock: pd.DataFrame) -> pd.DataFrame:
+    if stock.empty:
+        return pd.DataFrame()
+    matrix = stock.copy()
+    classified = matrix.apply(classify_replenishment, axis=1, result_type="expand")
+    matrix["quadrante_reposicao"] = classified[0]
+    matrix["cor_reposicao"] = classified[1]
+    matrix["racional_reposicao"] = classified[2]
+    return matrix.sort_values(["quadrante_reposicao", "receita_em_risco"], ascending=[True, False])
+
+
+def replenishment_matrix_chart(matrix: pd.DataFrame) -> go.Figure:
+    title = "Matriz de Reposicao"
+    if matrix.empty:
+        return empty_fig(title)
+    chart = matrix.copy()
+    chart["cobertura_plot"] = chart["cobertura_dias"].clip(upper=365)
+    chart["crescimento_fmt"] = chart["crescimento_marca"].map(signed_br_percent)
+    chart["cobertura_fmt"] = chart["cobertura_dias"].map(lambda value: f"{br_number(min(safe_number(value), 999), 1)} dias")
+    chart["capital_fmt"] = chart["capital_parado"].map(br_money)
+    color_map = {
+        "Comprar Agora": "#22C55E",
+        "Monitorar": "#2563EB",
+        "Excesso Estoque": "#D97706",
+        "Liquidar": "#DC2626",
+    }
+    fig = px.scatter(
+        chart,
+        x="cobertura_plot",
+        y="crescimento_marca",
+        size="capital_parado",
+        color="quadrante_reposicao",
+        color_discrete_map=color_map,
+        hover_name="produto_final",
+        custom_data=[
+            "marca_final",
+            "cobertura_fmt",
+            "crescimento_fmt",
+            "capital_fmt",
+            "quadrante_reposicao",
+            "racional_reposicao",
+        ],
+        size_max=36,
+    )
+    fig.update_traces(
+        hovertemplate=(
+            "<b>%{hovertext}</b><br>"
+            "Marca: %{customdata[0]}<br>"
+            "Dias de cobertura: %{customdata[1]}<br>"
+            "Crescimento marca/produto: %{customdata[2]}<br>"
+            "Capital investido: %{customdata[3]}<br>"
+            "Quadrante: %{customdata[4]}<br>"
+            "Definicao: cruza cobertura de estoque com crescimento historico.<br>"
+            "Formula: X = estoque_atual / venda_media_diaria; Y = crescimento mensal da marca.<br>"
+            "Interpretacao: %{customdata[5]}<extra></extra>"
+        )
+    )
+    fig.add_vline(x=30, line_dash="dash", line_color="rgba(148,163,184,.55)")
+    fig.add_vline(x=180, line_dash="dash", line_color="rgba(148,163,184,.55)")
+    fig.add_hline(y=0, line_dash="dash", line_color="rgba(148,163,184,.45)")
+    fig.update_xaxes(title_text="Dias de cobertura")
+    fig.update_yaxes(title_text="Crescimento da marca/produto (%)")
+    return layout_chart(fig, title, 520)
+
+
+def build_stock_abc(stock: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if stock.empty or metric not in stock.columns:
+        empty = pd.DataFrame(columns=["Classe", "Produtos", "Valor", "Participacao acumulada"])
+        return empty, pd.DataFrame()
+    base = stock.copy()
+    base[metric] = pd.to_numeric(base[metric], errors="coerce").fillna(0)
+    base = base[base[metric] > 0].sort_values(metric, ascending=False).copy()
+    if base.empty:
+        empty = pd.DataFrame(columns=["Classe", "Produtos", "Valor", "Participacao acumulada"])
+        return empty, base
+    total = float(base[metric].sum())
+    base["participacao"] = base[metric] / total * 100 if total else 0
+    base["participacao_acumulada"] = base["participacao"].cumsum()
+    base["classe_abc"] = base["participacao_acumulada"].map(
+        lambda value: "A" if value <= 80 else ("B" if value <= 95 else "C")
+    )
+    if not (base["classe_abc"] == "A").any() and not base.empty:
+        base.iloc[0, base.columns.get_loc("classe_abc")] = "A"
+    summary = (
+        base.groupby("classe_abc", as_index=False)
+        .agg(Produtos=("item_id", "nunique"), Valor=(metric, "sum"), Participacao=("participacao", "sum"))
+        .rename(columns={"classe_abc": "Classe"})
+    )
+    order = pd.CategoricalDtype(["A", "B", "C"], ordered=True)
+    summary["Classe"] = summary["Classe"].astype(order)
+    summary = summary.sort_values("Classe")
+    summary["Participacao acumulada"] = summary["Participacao"].cumsum()
+    return summary, base
+
+
+def format_abc_summary(summary: pd.DataFrame, value_label: str) -> pd.DataFrame:
+    if summary.empty:
+        return pd.DataFrame()
+    view = summary.copy().rename(columns={"Valor": value_label, "Participacao": "Participacao"})
+    view[value_label] = view[value_label].map(br_money)
+    view["Participacao"] = view["Participacao"].map(lambda value: br_percent(value, 1))
+    view["Participacao acumulada"] = view["Participacao acumulada"].map(lambda value: br_percent(value, 1))
+    return view
+
+
+def build_stock_abc_chart(summary: pd.DataFrame, value_label: str) -> go.Figure:
+    title = f"ABC por {value_label.lower()}"
+    if summary.empty:
+        return empty_fig(title)
+    chart = summary.copy()
+    chart["valor_fmt"] = chart["Valor"].map(br_money)
+    chart["participacao_fmt"] = chart["Participacao"].map(lambda value: br_percent(value, 1))
+    fig = go.Figure(
+        go.Bar(
+            x=chart["Classe"].astype(str),
+            y=chart["Valor"],
+            marker_color=["#22C55E", "#D97706", "#64748B"][: len(chart)],
+            customdata=chart[["Produtos", "valor_fmt", "participacao_fmt"]],
+            hovertemplate=(
+                "<b>Classe %{x}</b><br>"
+                "Produtos: %{customdata[0]}<br>"
+                f"{value_label}: %{{customdata[1]}}<br>"
+                "Participacao acumulada: %{customdata[2]}<br>"
+                "Definicao: curva ABC por participacao acumulada.<br>"
+                "Formula: valor da classe / valor total.<br>"
+                "Acao sugerida: Classe A recebe prioridade executiva.<extra></extra>"
+            ),
+        )
+    )
+    fig.update_yaxes(title_text=value_label)
+    return layout_chart(fig, title, 330)
+
+
+def render_stock_dataframe(df: pd.DataFrame, height: int = 320) -> None:
+    if df.empty:
+        st.info("Sem dados para os filtros atuais.")
+    else:
+        st.dataframe(df, use_container_width=True, hide_index=True, height=height)
+
+
+def build_stock_2_insights(
+    stock: pd.DataFrame,
+    rupture: pd.DataFrame,
+    excess: pd.DataFrame,
+    capital_bands: pd.DataFrame,
+    matrix: pd.DataFrame,
+) -> list[str]:
+    insights: list[str] = []
+    if not matrix.empty:
+        low_coverage_growth = matrix[
+            (matrix["crescimento_marca"].fillna(0) > 0)
+            & (matrix["cobertura_dias"].fillna(999) <= 30)
+        ].sort_values("crescimento_marca", ascending=False)
+        if not low_coverage_growth.empty:
+            row = low_coverage_growth.iloc[0]
+            insights.append(
+                f"{safe_text(row.get('marca_final'))} possui crescimento de "
+                f"{signed_br_percent(row.get('crescimento_marca'))} e cobertura de apenas "
+                f"{br_number(min(safe_number(row.get('cobertura_dias')), 999), 0)} dias."
+            )
+    if not capital_bands.empty:
+        cap_90 = float(capital_bands.loc[capital_bands["Faixa"] == "90+ dias", "Capital parado"].sum())
+        if cap_90 > 0:
+            insights.append(f"{br_money(cap_90)} estao parados em produtos sem venda ha mais de 90 dias.")
+    high_risk = rupture[rupture["risco_ruptura"].isin(["Critico", "Alto"])] if not rupture.empty else pd.DataFrame()
+    if not high_risk.empty:
+        insights.append(
+            f"{br_number(len(high_risk), 0)} produtos representam {br_money(float(high_risk['receita_em_risco'].sum()))} "
+            "de receita potencial em risco."
+        )
+    if not excess.empty:
+        top_excess = excess.iloc[0]
+        insights.append(
+            f"{safe_text(top_excess.get('marca_final'))} possui excesso de estoque com "
+            f"{br_money(safe_number(top_excess.get('capital_empatado')))} empatados."
+        )
+    if not insights:
+        insights.append("Estoque sem desvios executivos relevantes nos filtros atuais.")
+    return insights[:4]
+
+
+def build_stock_2_alerts(
+    stock: pd.DataFrame,
+    rupture: pd.DataFrame,
+    excess: pd.DataFrame,
+    capital_bands: pd.DataFrame,
+    capital_threshold: float = 50000.0,
+) -> list[dict[str, str]]:
+    alerts: list[dict[str, str]] = []
+    if not rupture.empty:
+        critical = rupture[rupture["risco_ruptura"] == "Critico"].copy()
+        if not critical.empty:
+            row = critical.sort_values("dias_cobertura").iloc[0]
+            alerts.append(
+                {
+                    "criticidade": "Alta",
+                    "titulo": f"{safe_text(row.get('produto_final'))} acaba em {br_number(row.get('dias_cobertura'), 0)} dias",
+                    "detalhe": "Repor estoque ou pausar anuncio ate regularizar disponibilidade.",
+                }
+            )
+    if not stock.empty:
+        growth_low = stock[
+            (stock["crescimento_marca"].fillna(0) > 0)
+            & (stock["cobertura_dias"].fillna(999) <= 30)
+        ]
+        if not growth_low.empty:
+            brand = (
+                growth_low.groupby("marca_final", as_index=False)
+                .agg(crescimento=("crescimento_marca", "max"), cobertura=("cobertura_dias", "min"))
+                .sort_values("crescimento", ascending=False)
+                .iloc[0]
+            )
+            alerts.append(
+                {
+                    "criticidade": "Oportunidade",
+                    "titulo": f"Marca {safe_text(brand['marca_final'])} cresce e possui baixa cobertura",
+                    "detalhe": f"Crescimento {signed_br_percent(brand['crescimento'])}; menor cobertura {br_number(brand['cobertura'], 0)} dias.",
+                }
+            )
+    if not excess.empty:
+        brand_excess = (
+            excess.groupby("marca_final", as_index=False)["capital_empatado"]
+            .sum()
+            .sort_values("capital_empatado", ascending=False)
+        )
+        if not brand_excess.empty:
+            row = brand_excess.iloc[0]
+            alerts.append(
+                {
+                    "criticidade": "Media",
+                    "titulo": f"Marca {safe_text(row['marca_final'])} possui excesso de estoque",
+                    "detalhe": f"Capital empatado estimado em {br_money(row['capital_empatado'])}. Segurar compra e ativar giro.",
+                }
+            )
+    if not capital_bands.empty:
+        capital_90 = float(capital_bands.loc[capital_bands["Faixa"] == "90+ dias", "Capital parado"].sum())
+        if capital_90 >= capital_threshold:
+            alerts.append(
+                {
+                    "criticidade": "Alta",
+                    "titulo": f"Capital parado acima de {br_money(capital_threshold)}",
+                    "detalhe": f"Produtos 90+ dias sem venda somam {br_money(capital_90)}.",
+                }
+            )
+    if not alerts:
+        alerts.append(
+            {
+                "criticidade": "Saudavel",
+                "titulo": "Sem alerta executivo critico",
+                "detalhe": "Ruptura, excesso e capital parado estao controlados nos filtros atuais.",
+            }
+        )
+    return alerts[:5]
+
+
 def render_operacional_estoque(
     filtered_sales: pd.DataFrame,
     inventory_df: pd.DataFrame,
@@ -11649,6 +12314,204 @@ def render_operacional_estoque(
     _quad_df = build_decision_quadrants(stock, matrix, filtered_sales)
     _daily_df = build_stock_sales_daily(filtered_sales, stock)
     _capital_enriched = build_capital_parado_enriched(stock, filtered_sales, selected_period)
+    _stock_2 = stock_with_brand_growth(stock, matrix)
+    _rupture = build_rupture_risk(_stock_2)
+    _capital_bands = build_capital_idle_bands(_stock_2)
+    _excess = build_excess_stock(_stock_2)
+    _replenishment = build_replenishment_matrix(_stock_2)
+    _abc_revenue_summary, _abc_revenue_detail = build_stock_abc(_stock_2, "receita")
+    _abc_capital_summary, _abc_capital_detail = build_stock_abc(_stock_2, "capital_parado")
+
+    render_stock_section_title("Risco de Ruptura")
+    if _rupture.empty:
+        st.info("Sem dados de estoque suficientes para estimar ruptura.")
+    else:
+        _critical_risk = _rupture[_rupture["risco_ruptura"] == "Critico"]
+        _high_risk = _rupture[_rupture["risco_ruptura"] == "Alto"]
+        _coverage_base = _rupture[_rupture["venda_media_diaria"].fillna(0) > 0]
+        _avg_coverage = float(_coverage_base["dias_cobertura"].clip(upper=999).mean()) if not _coverage_base.empty else 0.0
+        risk_cards = [
+            render_stock_kpi_card("Produtos em ruptura critica", br_number(len(_critical_risk), 0), "#DC2626", "Cobertura <= 7 dias", "Estimativa baseada no consumo medio historico."),
+            render_stock_kpi_card("Receita em risco", br_money(float(_rupture[_rupture["risco_ruptura"].isin(["Critico", "Alto"])]["receita_em_risco"].sum())), "#D97706", "Receita media diaria x dias sem cobertura", "Priorizar maior impacto."),
+            render_stock_kpi_card("Produtos em risco alto", br_number(len(_high_risk), 0), "#EA580C", "Cobertura de 8 a 15 dias", "Planejar compra curta."),
+            render_stock_kpi_card("Dias medios de cobertura", f"{br_number(_avg_coverage, 1)} dias", "#0F766E", "Media dos produtos com venda", "Equilibrar ruptura e excesso."),
+        ]
+        st.markdown(f'<div class="stock-kpi-grid">{"".join(risk_cards)}</div>', unsafe_allow_html=True)
+        risk_view = _rupture[_rupture["risco_ruptura"].isin(["Critico", "Alto", "Medio"])].head(20).copy()
+        if risk_view.empty:
+            st.success("Nenhum produto com cobertura ate 30 dias nos filtros atuais.")
+        else:
+            risk_view = risk_view[["produto_final", "marca_final", "risco_ruptura", "estoque_atual", "venda_media_diaria", "dias_cobertura", "receita_em_risco"]].rename(
+                columns={
+                    "produto_final": "Produto",
+                    "marca_final": "Marca",
+                    "risco_ruptura": "Risco",
+                    "estoque_atual": "Estoque",
+                    "venda_media_diaria": "Venda media diaria",
+                    "dias_cobertura": "Cobertura",
+                    "receita_em_risco": "Receita em risco",
+                }
+            )
+            risk_view["Estoque"] = risk_view["Estoque"].map(lambda value: br_number(value, 0))
+            risk_view["Venda media diaria"] = risk_view["Venda media diaria"].map(lambda value: br_number(value, 2))
+            risk_view["Cobertura"] = risk_view["Cobertura"].map(lambda value: f"{br_number(min(safe_number(value), 999), 1)} dias")
+            risk_view["Receita em risco"] = risk_view["Receita em risco"].map(br_money)
+            render_stock_dataframe(risk_view, 340)
+
+    render_stock_section_title("Compras Prioritarias")
+    _purchase_default = build_purchase_recommendations(_stock_2, 30)
+    if _purchase_default.empty:
+        st.info("Sem compra prioritaria pelos criterios atuais.")
+    else:
+        purchase_totals = []
+        for _horizon in [30, 60, 90]:
+            _rec = build_purchase_recommendations(_stock_2, _horizon)
+            _qty = float(_rec["compra_sugerida"].sum()) if not _rec.empty else 0.0
+            _impact = float(_rec["impacto_faturamento"].sum()) if not _rec.empty else 0.0
+            purchase_totals.append(
+                render_stock_kpi_card(
+                    f"Compra {_horizon} dias",
+                    br_number(_qty, 0),
+                    "#2563EB" if _horizon == 30 else ("#0F766E" if _horizon == 60 else "#7C3AED"),
+                    "Unidades sugeridas",
+                    f"{br_money(_impact)} de impacto",
+                    "Formula: max(0, venda media diaria x horizonte - estoque atual).",
+                )
+            )
+        st.markdown(f'<div class="stock-kpi-grid">{"".join(purchase_totals)}</div>', unsafe_allow_html=True)
+        render_stock_dataframe(format_purchase_recommendations_table(_purchase_default), 420)
+
+    render_stock_section_title("Capital Parado Avancado")
+    if _capital_bands.empty:
+        st.info("Sem capital parado nos filtros atuais.")
+    else:
+        band_cards = []
+        for _, _row in _capital_bands.iterrows():
+            band_cards.append(
+                f'<div class="stock-band-card" title="{html.escape("Definicao: capital em produtos com estoque e sem venda na faixa. Formula: soma de estoque_atual x valor_unitario_estimado. Interpretacao: quanto maior, mais caixa preso. Acao sugerida: promocao, corte de compra ou liquidacao.", quote=True)}">'
+                f'<div class="stock-band-label">{html.escape(safe_text(_row["Faixa"]))}</div>'
+                f'<div class="stock-band-value">{html.escape(br_money(_row["Capital parado"]))}</div>'
+                f'<div class="stock-band-detail">{html.escape(br_number(_row["Produtos"], 0))} produto(s)</div>'
+                "</div>"
+            )
+        st.markdown(f'<div class="stock-band-grid">{"".join(band_cards)}</div>', unsafe_allow_html=True)
+        st.plotly_chart(capital_idle_bands_chart(_capital_bands), use_container_width=True)
+
+    render_stock_section_title("Estoque Excedente")
+    if _excess.empty:
+        st.success("Nenhum excesso relevante detectado pelos criterios de cobertura > 180 dias ou sem venda > 90 dias.")
+    else:
+        excess_cards = [
+            render_stock_kpi_card("Capital parado", br_money(float(_excess["capital_empatado"].sum())), "#D97706", "Capital empatado em excesso", "Cobertura > 180 dias ou sem venda > 90 dias."),
+            render_stock_kpi_card("Receita em risco", br_money(float(_excess["receita_potencial_perdida"].sum())), "#DC2626", "Receita potencial perdida", "Acelerar giro antes de nova compra."),
+            render_stock_kpi_card("Produtos envolvidos", br_number(len(_excess), 0), "#64748B", "Itens com excesso", "Classificados por severidade."),
+            render_stock_kpi_card("Excesso critico", br_number(int((_excess["classificacao_excesso"] == "Excesso critico").sum()), 0), "#7C2D12", "Cobertura extrema ou sem venda prolongada", "Liquidar prioridade alta."),
+        ]
+        st.markdown(f'<div class="stock-kpi-grid">{"".join(excess_cards)}</div>', unsafe_allow_html=True)
+        render_stock_dataframe(format_excess_stock_table(_excess), 380)
+
+    render_stock_section_title("Matriz de Reposicao")
+    st.plotly_chart(replenishment_matrix_chart(_replenishment), use_container_width=True)
+
+    render_stock_section_title("Curva ABC de Estoque")
+    abc_col1, abc_col2 = st.columns(2)
+    with abc_col1:
+        st.plotly_chart(build_stock_abc_chart(_abc_revenue_summary, "Faturamento"), use_container_width=True)
+        render_stock_dataframe(format_abc_summary(_abc_revenue_summary, "Faturamento"), 190)
+    with abc_col2:
+        st.plotly_chart(build_stock_abc_chart(_abc_capital_summary, "Capital investido"), use_container_width=True)
+        render_stock_dataframe(format_abc_summary(_abc_capital_summary, "Capital investido"), 190)
+    with st.expander("Detalhes ABC de estoque", expanded=False):
+        abc_mode = st.radio("ABC por", ["Faturamento", "Capital investido"], horizontal=True, key="abc_estoque_modo")
+        abc_detail = _abc_revenue_detail if abc_mode == "Faturamento" else _abc_capital_detail
+        abc_metric = "receita" if abc_mode == "Faturamento" else "capital_parado"
+        if abc_detail.empty:
+            st.info("Sem itens para a Curva ABC nos filtros atuais.")
+        else:
+            abc_view = abc_detail.head(50)[["classe_abc", "produto_final", "marca_final", abc_metric, "participacao_acumulada"]].rename(
+                columns={
+                    "classe_abc": "Classe",
+                    "produto_final": "Produto",
+                    "marca_final": "Marca",
+                    abc_metric: abc_mode,
+                    "participacao_acumulada": "Participacao acumulada",
+                }
+            )
+            abc_view[abc_mode] = abc_view[abc_mode].map(br_money)
+            abc_view["Participacao acumulada"] = abc_view["Participacao acumulada"].map(lambda value: br_percent(value, 1))
+            render_stock_dataframe(abc_view, 420)
+
+    render_stock_section_title("Planejamento de Compras")
+    horizon_days = st.radio("Horizonte de compra", [30, 60, 90], horizontal=True, key="planejamento_compras_horizonte")
+    _planned = build_purchase_recommendations(_stock_2, int(horizon_days))
+    if _planned.empty:
+        st.info("Sem necessidade de compra para o horizonte selecionado.")
+    else:
+        _capital_needed = float(_planned["impacto_faturamento"].sum())
+        _products_involved = int(len(_planned))
+        _projected_base = _stock_2.copy()
+        _projected_base["compra_planejada"] = _projected_base["item_id"].map(dict(zip(_planned["item_id"], _planned["compra_sugerida"]))).fillna(0)
+        _projected_base["cobertura_projetada"] = _projected_base.apply(
+            lambda row: (
+                (safe_number(row.get("estoque_atual")) + safe_number(row.get("compra_planejada"))) / safe_number(row.get("venda_media_diaria"))
+                if safe_number(row.get("venda_media_diaria")) > 0
+                else 999
+            ),
+            axis=1,
+        )
+        _projected_avg = float(_projected_base.loc[_projected_base["venda_media_diaria"].fillna(0) > 0, "cobertura_projetada"].clip(upper=999).mean())
+        plan_cards = [
+            render_stock_kpi_card("Capital necessario", br_money(_capital_needed), "#2563EB", f"Horizonte {horizon_days} dias", "Compra sugerida x valor unitario"),
+            render_stock_kpi_card("Produtos envolvidos", br_number(_products_involved, 0), "#0F766E", "Itens com compra sugerida", "Ordenar por impacto"),
+            render_stock_kpi_card("Cobertura projetada", f"{br_number(_projected_avg, 1)} dias", "#7C3AED", "Media apos compra", "Comparar horizontes"),
+        ]
+        st.markdown(f'<div class="stock-kpi-grid">{"".join(plan_cards)}</div>', unsafe_allow_html=True)
+        render_stock_dataframe(format_purchase_recommendations_table(_planned), 360)
+
+    render_stock_section_title("Receita em Risco")
+    _risk_revenue = _rupture[_rupture["receita_em_risco"].fillna(0) > 0].sort_values("receita_em_risco", ascending=False)
+    if _risk_revenue.empty:
+        st.success("Sem receita em risco por ruptura nos filtros atuais.")
+    else:
+        risk_revenue_view = _risk_revenue.head(20)[["produto_final", "marca_final", "estoque_atual", "venda_media_diaria", "dias_cobertura", "dias_projetados_sem_estoque", "receita_em_risco"]].rename(
+            columns={
+                "produto_final": "Produto",
+                "marca_final": "Marca",
+                "estoque_atual": "Estoque",
+                "venda_media_diaria": "Venda media diaria",
+                "dias_cobertura": "Cobertura",
+                "dias_projetados_sem_estoque": "Dias sem estoque projetados",
+                "receita_em_risco": "Receita em risco",
+            }
+        )
+        risk_revenue_view["Estoque"] = risk_revenue_view["Estoque"].map(lambda value: br_number(value, 0))
+        risk_revenue_view["Venda media diaria"] = risk_revenue_view["Venda media diaria"].map(lambda value: br_number(value, 2))
+        risk_revenue_view["Cobertura"] = risk_revenue_view["Cobertura"].map(lambda value: f"{br_number(min(safe_number(value), 999), 1)} dias")
+        risk_revenue_view["Dias sem estoque projetados"] = risk_revenue_view["Dias sem estoque projetados"].map(lambda value: br_number(value, 1))
+        risk_revenue_view["Receita em risco"] = risk_revenue_view["Receita em risco"].map(br_money)
+        render_stock_dataframe(risk_revenue_view, 380)
+
+    render_stock_section_title("Insights Automaticos")
+    _insights_2 = build_stock_2_insights(_stock_2, _rupture, _excess, _capital_bands, _replenishment)
+    _alerts_2 = build_stock_2_alerts(_stock_2, _rupture, _excess, _capital_bands)
+    _insight_html = "".join(
+        f'<div class="stock-alert-card" style="--alert-color:#0F766E;" title="{html.escape("Definicao: insight automatico gerado a partir de crescimento, cobertura, capital parado e receita em risco. Formula: regras executivas sobre os dados filtrados. Interpretacao: destaca prioridades de decisao. Acao sugerida: abrir a tabela do bloco correspondente.", quote=True)}">'
+        f'<div class="stock-alert-severity">Insight</div>'
+        f'<div class="stock-alert-title">{html.escape(_text)}</div>'
+        "</div>"
+        for _text in _insights_2
+    )
+    st.markdown(f'<div class="stock-alert-grid">{_insight_html}</div>', unsafe_allow_html=True)
+    severity_colors_2 = {"Alta": "#DC2626", "Media": "#D97706", "Oportunidade": "#0F766E", "Saudavel": "#0F766E"}
+    _alerts_2_html = "".join(
+        f'<div class="stock-alert-card" style="--alert-color:{severity_colors_2.get(_alert["criticidade"], "#64748B")};" title="{html.escape("Definicao: alerta executivo de estoque. Formula: regras sobre cobertura, crescimento, excesso e capital parado. Interpretacao: sinaliza acao prioritaria. Acao sugerida: executar a recomendacao descrita no card.", quote=True)}">'
+        f'<div class="stock-alert-severity">{html.escape(_alert["criticidade"])}</div>'
+        f'<div class="stock-alert-title">{html.escape(_alert["titulo"])}</div>'
+        f'<div class="stock-alert-detail">{html.escape(_alert["detalhe"])}</div>'
+        "</div>"
+        for _alert in _alerts_2
+    )
+    st.markdown(f'<div class="stock-alert-grid">{_alerts_2_html}</div>', unsafe_allow_html=True)
 
     # ── BLOCO 0: PAINEL DE DECISÃO (topo da aba) ───────────────────────
     render_stock_section_title("Painel de Decisao — Onde Agir Agora")
@@ -12744,7 +13607,7 @@ def render_ads_performance(
     _revenue_ads  = float(kpis.get("revenue") or 0.0)
 
     if _conv_ml_ref > 0:
-        _pedidos_totais  = float(financial_base["order_id"].nunique()) if not financial_base.empty and "order_id" in financial_base.columns else 0
+        _pedidos_totais  = float(count_orders(financial_base)) if not financial_base.empty else 0
         _visitas_totais  = _pedidos_totais / (_conv_ml_ref / 100) if _conv_ml_ref > 0 else 0
         _visitas_org_est = max(_visitas_totais - _total_clicks, 0)
         _units_org_est   = max(float(financial_base["quantity"].sum() if not financial_base.empty else 0) - _units_ads, 0)
@@ -12899,7 +13762,8 @@ def main() -> None:
 
     try:
         with st.spinner("Preparando dashboard executivo..."):
-            df = load_data(str(DATA_PATH))
+            df = load_data(str(DATA_PATH), file_cache_signature(DATA_PATH))
+            debug_dashboard_loaded_dates(df)
             seconds_official_df = load_seconds_official_data(str(SECONDS_OFFICIAL_PATH))
             inventory_df = load_inventory_data(str(INVENTORY_PATH))
             ads_df = load_ads_metrics(str(ADS_METRICS_PATH))
