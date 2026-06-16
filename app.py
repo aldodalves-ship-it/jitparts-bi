@@ -862,6 +862,125 @@ def inject_css() -> None:
     )
 
 
+def get_dashboard_password() -> str | None:
+    """Le a senha do dashboard a partir dos secrets do Streamlit."""
+
+    try:
+        password = st.secrets["DASHBOARD_PASSWORD"]
+    except Exception:
+        return None
+    password = str(password).strip()
+    return password or None
+
+
+def render_login_screen() -> None:
+    """Renderiza a tela de autenticacao antes de qualquer dado do BI."""
+
+    st.markdown(
+        """
+        <style>
+            [data-testid="stSidebar"] {
+                display: none;
+            }
+            .auth-shell {
+                min-height: 50vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 48px 0 18px;
+            }
+            .auth-panel {
+                width: 100%;
+                border: 1px solid rgba(148, 163, 184, 0.28);
+                border-radius: 18px;
+                padding: 34px 30px 28px;
+                background:
+                    linear-gradient(145deg, rgba(15, 23, 42, 0.96), rgba(17, 24, 39, 0.92)),
+                    radial-gradient(circle at 18% 0%, rgba(20, 184, 166, 0.16), transparent 32%);
+                box-shadow: 0 28px 70px rgba(2, 6, 23, 0.34);
+                text-align: center;
+            }
+            .auth-lock {
+                width: 58px;
+                height: 58px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                border-radius: 16px;
+                margin-bottom: 18px;
+                color: #f8fafc;
+                background: linear-gradient(135deg, #0f766e, #14b8a6);
+                box-shadow: 0 16px 32px rgba(20, 184, 166, 0.22);
+                font-size: 28px;
+            }
+            .auth-title {
+                margin: 0;
+                color: #f8fafc;
+                font-size: 1.45rem;
+                font-weight: 800;
+                letter-spacing: 0;
+            }
+            .auth-subtitle {
+                margin: 10px 0 0;
+                color: #cbd5e1;
+                font-size: 0.95rem;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    expected_password = get_dashboard_password()
+
+    _, center, _ = st.columns([1, 1.1, 1])
+    with center:
+        st.markdown(
+            """
+            <div class="auth-shell">
+              <div class="auth-panel">
+                <div class="auth-lock">&#128274;</div>
+                <h1 class="auth-title">Acesso Restrito - Jit Parts Executive BI</h1>
+                <p class="auth-subtitle">Informe a senha para acessar o dashboard executivo.</p>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if expected_password is None:
+            st.error("DASHBOARD_PASSWORD nao configurada em st.secrets.")
+            return
+
+        with st.form("dashboard_login_form", clear_on_submit=True):
+            password = st.text_input("Senha", type="password")
+            submitted = st.form_submit_button("Entrar", use_container_width=True)
+
+        if submitted:
+            if password == expected_password:
+                st.session_state["dashboard_authenticated"] = True
+                st.session_state.pop("dashboard_login_error", None)
+                st.rerun()
+            st.session_state["dashboard_login_error"] = True
+
+        if st.session_state.get("dashboard_login_error"):
+            st.error("Senha inválida")
+
+
+def require_dashboard_authentication() -> None:
+    """Bloqueia o dashboard ate a autenticacao da sessao atual."""
+
+    if st.session_state.get("dashboard_authenticated") is True:
+        with st.sidebar:
+            if st.button("Logout", use_container_width=True):
+                st.session_state["dashboard_authenticated"] = False
+                st.session_state.pop("dashboard_login_error", None)
+                st.rerun()
+        return
+
+    render_login_screen()
+    st.stop()
+
+
 def br_money(value: float | int | None) -> str:
     if value is None or pd.isna(value):
         return "N/D"
@@ -13755,6 +13874,7 @@ def render_base_completa(df: pd.DataFrame) -> None:
 
 def main() -> None:
     inject_css()
+    require_dashboard_authentication()
 
     # Bootstrap: garante que os dados existem
     if not ensure_data_ready(show_ui=True):
